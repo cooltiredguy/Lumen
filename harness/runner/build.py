@@ -26,4 +26,7 @@ def build(ssh_host: str, brew_prefix: str, deploy_dir: str, build_dir: str) -> s
     run_remote(ssh_host, brew_prefix, cfg, timeout=1800)
     make = f"cd {build_dir} && make sunshine vd_helper -j$(sysctl -n hw.ncpu)"
     run_remote(ssh_host, brew_prefix, make, timeout=3600)
-    return f"{build_dir}/sunshine"
+    # Clean-named copy (no dots): Finder types 'sunshine-0.0.0' as a "Document" and the
+    # Screen Recording grant picker greys it out. 'lumen' is a selectable Unix executable.
+    run_remote(ssh_host, brew_prefix, f"cp -fL {build_dir}/sunshine {build_dir}/lumen")
+    return f"{build_dir}/lumen"
