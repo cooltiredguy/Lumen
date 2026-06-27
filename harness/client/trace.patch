@@ -12,10 +12,10 @@ index 740f010..bf75683 100644
          streaming/video/ffmpeg-renderers/swframemapper.cpp \
 diff --git a/app/streaming/video/client_trace.cpp b/app/streaming/video/client_trace.cpp
 new file mode 100644
-index 0000000..8fb4c2b
+index 0000000..ba814df
 --- /dev/null
 +++ b/app/streaming/video/client_trace.cpp
-@@ -0,0 +1,46 @@
+@@ -0,0 +1,48 @@
 +#include "client_trace.h"
 +#include <cstdlib>
 +#include <fstream>
@@ -39,6 +39,8 @@ index 0000000..8fb4c2b
 +  const char *topology = std::getenv("MOONLIGHT_TRACE_TOPOLOGY");
 +  g_run_id   = run_id   ? run_id   : "unknown";
 +  g_topology = topology ? topology : "loopback";
++  // run_id and topology are harness-controlled values; they must not contain
++  // JSON-unsafe characters ('"' or '\') — the caller (harness/runner) guarantees this.
 +  g_file.open(path, std::ios::out | std::ios::app);
 +  g_enabled = g_file.is_open();
 +}
