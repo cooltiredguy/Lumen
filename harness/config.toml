@@ -12,3 +12,43 @@ config_dir    = "/Users/hazemeissa/.config/sunshine"   # appdata on the mini (st
 min_log_level = 0               # 0 = verbose (per-frame Sent Frame seq + debug latency loggers)
 idle_seconds  = 20               # how long to let Lumen run in this Plan-1 smoke loop
 trace_dir     = "/Volumes/T7/lumen-harness/traces"
+
+[lumen]
+# Admin credentials for the Lumen web API (used by the automated client setup flow).
+# Must match the username/password configured in Lumen's web UI.
+admin_user     = "admin"
+admin_password = "CHANGEME"
+# The HTTPS base URL of the Lumen config server on the mini.
+api_url        = "https://mac-mini:47990"
+# Fixed 4-digit numeric code used for automated client setup.
+pair_pin       = "7777"
+
+[topologies]
+order = ["loopback", "wifi"]   # both topologies run each loop
+
+[topologies.loopback]
+# Client and readback run on the mini against 127.0.0.1.
+client_target = "127.0.0.1"
+run_on        = "mini"
+
+[topologies.wifi]
+# Client and readback run on the dev box (M5 Max) against the mini.
+client_target = "mac-mini"
+run_on        = "dev"
+
+[client]
+# Path to the Moonlight binary on each machine (set after running setup.sh).
+moonlight_bin_dev  = "/Volumes/T7/lumen-harness/moonlight-qt-build/moonlight-qt/app/Moonlight.app/Contents/MacOS/Moonlight"
+moonlight_bin_mini = "/Volumes/T7/lumen-harness/moonlight-qt-mini/Moonlight.app/Contents/MacOS/Moonlight"
+app            = "Desktop"
+resolution     = "1920x1080"
+fps            = 60
+bitrate_kbps   = 20000
+stream_seconds = 20
+
+[workload]
+fps          = 60
+counter_bits = 20
+
+[readback]
+window_match = "Moonlight"
