@@ -33,6 +33,7 @@ extern "C" {
 #include "system_tray.h"
 #include "thread_safe.h"
 #include "utility.h"
+#include "trace.h"
 
 #define IDX_START_A 0
 #define IDX_START_B 1
@@ -1578,6 +1579,7 @@ namespace stream {
                              << (frame_is_dupe ? " Dupe" : "")
                              << (packet->is_idr() ? " Key" : "")
                              << (packet->after_ref_frame_invalidation ? " RFI" : "");
+          lumen::trace::emit(packet->frame_index(), "send_last", lumen::trace::ns_now());
 
           ++blockIndex;
           lowseq += shards.size();
