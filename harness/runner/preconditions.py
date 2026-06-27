@@ -27,6 +27,10 @@ def console_user_present(ssh_host: str, brew_prefix: str) -> bool:
     return out.strip() not in ("", "loginwindow")
 
 
+def console_user_name(ssh_host: str, brew_prefix: str) -> str:
+    return run_remote(ssh_host, brew_prefix, "stat -f%Su /dev/console").stdout.strip()
+
+
 def aqua_session_ready(ssh_host: str, brew_prefix: str, uid: int) -> bool:
     # `launchctl asuser` switches audit sessions => needs root. Passwordless sudo
     # for /bin/launchctl is provisioned via /etc/sudoers.d/lumen-harness (one-time).
