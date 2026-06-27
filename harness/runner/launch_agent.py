@@ -1,11 +1,17 @@
 PLIST_LABEL = "dev.lumen.host"
+READBACK_LABEL = "dev.lumen.readback"
 
 
 def agent_plist_path(user: str) -> str:
     return f"/Users/{user}/Library/LaunchAgents/{PLIST_LABEL}.plist"
 
 
-def render_plist(program_args: list[str], env: dict[str, str], log_file: str) -> str:
+def readback_plist_path(user: str) -> str:
+    return f"/Users/{user}/Library/LaunchAgents/{READBACK_LABEL}.plist"
+
+
+def render_plist(program_args: list[str], env: dict[str, str], log_file: str,
+                 label: str = PLIST_LABEL) -> str:
     """A LaunchAgent plist. launchd execs the program DIRECTLY, so it is its own
     TCC 'responsible process' — Screen Recording granted to lumen actually applies
     (unlike launching via sudo/asuser/bash wrappers, which mis-attribute the grant)."""
@@ -16,7 +22,7 @@ def render_plist(program_args: list[str], env: dict[str, str], log_file: str) ->
         '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
         '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
         '<plist version="1.0"><dict>\n'
-        f'  <key>Label</key><string>{PLIST_LABEL}</string>\n'
+        f'  <key>Label</key><string>{label}</string>\n'
         f'  <key>ProgramArguments</key><array>{args}\n  </array>\n'
         f'  <key>EnvironmentVariables</key><dict>{envx}\n  </dict>\n'
         f'  <key>StandardOutPath</key><string>{log_file}</string>\n'

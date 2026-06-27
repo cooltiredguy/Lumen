@@ -16,8 +16,8 @@ trace_dir     = "/Volumes/T7/lumen-harness/traces"
 [lumen]
 # Admin credentials for the Lumen web API (used by the automated client setup flow).
 # Must match the username/password configured in Lumen's web UI.
-admin_user     = "admin"
-admin_password = "CHANGEME"
+admin_user     = "admin"  # was "sunshine" — reset via sunshine_state.json
+admin_password = "lumen-harness"
 # The HTTPS base URL of the Lumen config server on the mini.
 api_url        = "https://mac-mini:47990"
 # Fixed 4-digit numeric code used for automated client setup.
@@ -38,7 +38,7 @@ run_on        = "dev"
 
 [client]
 # Path to the Moonlight binary on each machine (set after running setup.sh).
-moonlight_bin_dev  = "/Volumes/T7/lumen-harness/moonlight-qt-build/moonlight-qt/app/Moonlight.app/Contents/MacOS/Moonlight"
+moonlight_bin_dev  = "/Users/hazemeissa/moonlight-harness-bin/Moonlight.app/Contents/MacOS/Moonlight"
 moonlight_bin_mini = "/Volumes/T7/lumen-harness/moonlight-qt-mini/Moonlight.app/Contents/MacOS/Moonlight"
 app            = "Desktop"
 resolution     = "1920x1080"

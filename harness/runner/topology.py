@@ -35,17 +35,25 @@ def run_wifi_topology(cfg: dict, run_id: str, run_dir: Path) -> str:
         "--no-frame-pacing",
     ]
 
-    # ── Start readback on dev box (captures Moonlight window) ────────────
+    print(f"[topology:wifi] starting stream: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, env=env)
+
+    # Wait for Moonlight to open its window before starting readback
+    _READBACK_DELAY = 5
+    time.sleep(_READBACK_DELAY)
+
+    # ── Start readback on dev box after Moonlight window is up ────────────
     readback_trace_local = str(run_dir / "readback_wifi.jsonl")
+    readback_log_local   = str(run_dir / "readback_wifi.log")
     env_rb = os.environ.copy()
     env_rb["LUMEN_READBACK_TRACE_FILE"] = readback_trace_local
     env_rb["LUMEN_READBACK_BITS"]       = str(cfg["workload"]["counter_bits"])
     env_rb["LUMEN_READBACK_SECONDS"]    = str(client_cfg["stream_seconds"])
     readback_bin_local = str(Path(__file__).parent.parent / "readback" / "LumenReadback")
-    rb_proc = subprocess.Popen([readback_bin_local], env=env_rb)
+    with open(readback_log_local, "w") as log_fh:
+        rb_proc = subprocess.Popen([readback_bin_local], env=env_rb,
+                                   stdout=log_fh, stderr=log_fh)
 
-    print(f"[topology:wifi] starting stream: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, env=env)
     time.sleep(client_cfg["stream_seconds"])
     proc.terminate()
     try:
@@ -53,12 +61,17 @@ def run_wifi_topology(cfg: dict, run_id: str, run_dir: Path) -> str:
     except subprocess.TimeoutExpired:
         proc.kill()
 
-    # Stop readback
     try:
         rb_proc.terminate()
         rb_proc.wait(timeout=5)
     except Exception:
         rb_proc.kill()
+
+    rb_events = Path(readback_trace_local).read_text().count("\n") if Path(readback_trace_local).exists() else 0
+    rb_log = Path(readback_log_local).read_text().strip() if Path(readback_log_local).exists() else ""
+    print(f"[topology:wifi] readback={rb_events} events")
+    if rb_events == 0:
+        print(f"[topology:wifi] readback log: {rb_log}")
 
     print(f"[topology:wifi] done; trace: {trace_file}")
     return trace_file
@@ -73,6 +86,9 @@ def run_loopback_topology(
     Returns path to the local client trace file (fetched from mini after run).
     """
     from harness.runner import mini as minimod
+    from harness.runner.launch_agent import (
+        READBACK_LABEL, readback_plist_path, render_plist,
+    )
 
     client_cfg = cfg["client"]
     moonlight_bin_mini = client_cfg["moonlight_bin_mini"]
@@ -84,6 +100,7 @@ def run_loopback_topology(
         "cat /tmp/sunshine_vd_id 2>/dev/null", check=False)
     vd_id = vd_result.stdout.strip()
 
+    # ── Start workload via asuser (no TCC needed, just display API) ──────
     workload_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenWorkload"
     workload_trace = f"/tmp/workload_{run_id}.jsonl"
     workload_cmd = (
@@ -96,17 +113,7 @@ def run_loopback_topology(
     )
     subprocess.Popen(["ssh", ssh_host, workload_cmd + " &"])
 
-    readback_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenReadback"
-    readback_trace = f"/tmp/readback_loopback_{run_id}.jsonl"
-    readback_cmd = (
-        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
-        f"LUMEN_READBACK_TRACE_FILE={readback_trace} "
-        f"LUMEN_READBACK_BITS={cfg['workload']['counter_bits']} "
-        f"LUMEN_READBACK_SECONDS={client_cfg['stream_seconds']} "
-        f"{readback_bin}"
-    )
-    subprocess.Popen(["ssh", ssh_host, readback_cmd + " &"])
-
+    # ── Start Moonlight stream ────────────────────────────────────────────
     stream_cmd = (
         f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
         f"MOONLIGHT_TRACE_FILE={remote_trace} "
@@ -119,16 +126,48 @@ def run_loopback_topology(
         f"--display-mode windowed --no-vsync --no-frame-pacing"
     )
     print(f"[topology:loopback] starting client on mini")
-    # Run in background — SSH exits immediately; moonlight stream continues on mini
     subprocess.Popen(["ssh", ssh_host, stream_cmd + " &"])
-    time.sleep(client_cfg["stream_seconds"])
 
-    # Kill the client on the mini (runs as console_user now, so no sudo needed)
+    # ── Start readback via LaunchAgent (launchd direct exec = correct TCC attribution) ──
+    # Delay so Moonlight window is up before we search for it
+    _READBACK_DELAY = 5
+    time.sleep(_READBACK_DELAY)
+
+    readback_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenReadback"
+    readback_trace = f"/tmp/readback_loopback_{run_id}.jsonl"
+    readback_log = f"/tmp/readback_loopback_{run_id}.log"
+    rb_plist = render_plist(
+        [readback_bin],
+        {
+            "LUMEN_READBACK_TRACE_FILE": readback_trace,
+            "LUMEN_READBACK_BITS":       str(cfg["workload"]["counter_bits"]),
+            "LUMEN_READBACK_SECONDS":    str(client_cfg["stream_seconds"]),
+        },
+        readback_log,
+        label=READBACK_LABEL,
+    )
+    rb_path = readback_plist_path(console_user)
+    minimod.run_remote(ssh_host, brew_prefix,
+        f"mkdir -p /Users/{console_user}/Library/LaunchAgents && "
+        f"cat > {rb_path} <<'PLIST'\n{rb_plist}\nPLIST")
+    # bootout any stale instance, then bootstrap fresh
+    minimod.run_remote(ssh_host, brew_prefix,
+        f"sudo -n launchctl bootout gui/501/{READBACK_LABEL}", check=False)
+    minimod.run_remote(ssh_host, brew_prefix,
+        f"sudo -n launchctl bootstrap gui/501 {rb_path}")
+
+    # Wait for readback to finish (it self-terminates after LUMEN_READBACK_SECONDS)
+    time.sleep(client_cfg["stream_seconds"] + 2)
+
+    minimod.run_remote(ssh_host, brew_prefix,
+        f"sudo -n launchctl bootout gui/501/{READBACK_LABEL}", check=False)
+
+    # Kill the Moonlight client on the mini
     minimod.run_remote(ssh_host, brew_prefix,
         f"pkill -u {console_user} -f 'Moonlight.*127.0.0.1' || true", check=False)
     time.sleep(2)
 
-    # Fetch trace back to dev box
+    # Fetch client trace back to dev box
     result = minimod.run_remote(ssh_host, brew_prefix,
         f"cat {remote_trace} 2>/dev/null", check=False)
     raw = result.stdout
@@ -142,11 +181,17 @@ def run_loopback_topology(
     wt_raw = wt_result.stdout
     (run_dir / "workload_trace.jsonl").write_text(wt_raw)
 
-    # Fetch loopback readback trace
+    # Fetch loopback readback trace and log
     rb_result = minimod.run_remote(ssh_host, brew_prefix,
         f"cat {readback_trace} 2>/dev/null", check=False)
     rb_raw = rb_result.stdout
     (run_dir / "readback_loopback.jsonl").write_text(rb_raw)
-    print(f"[topology:loopback] workload={wt_raw.count(chr(10))} readback={rb_raw.count(chr(10))} events")
+    rb_log_result = minimod.run_remote(ssh_host, brew_prefix,
+        f"cat {readback_log} 2>/dev/null", check=False)
+    (run_dir / "readback_loopback.log").write_text(rb_log_result.stdout)
+    rb_events = rb_raw.count("\n")
+    print(f"[topology:loopback] workload={wt_raw.count(chr(10))} readback={rb_events} events")
+    if rb_events == 0:
+        print(f"[topology:loopback] readback log: {rb_log_result.stdout.strip()}")
 
     return local_trace

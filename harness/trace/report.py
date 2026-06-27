@@ -25,6 +25,9 @@ def _percentiles(values: list) -> dict:
     }
 
 
+_MAX_STAGE_NS = 5_000 * 1_000_000  # 5 s — drop idle-period outliers
+
+
 def compute_stages(events: list) -> dict:
     by_frame: dict = {}
     for e in events:
@@ -42,7 +45,10 @@ def compute_stages(events: list) -> dict:
     for stages in by_frame.values():
         for a, b, name in stage_pairs:
             if a in stages and b in stages:
-                durations[name].append(float(stages[b] - stages[a]))
+                d = float(stages[b] - stages[a])
+                # Drop negative (cross-session stale events) and outliers > 5 s
+                if 0 < d < _MAX_STAGE_NS:
+                    durations[name].append(d)
 
     return {name: _percentiles(v) for name, v in durations.items()}
 
@@ -235,6 +241,7 @@ def generate_report(trace_path: str, run_dir: Path) -> dict:
     prev = _load_prev_report(run_dir.parent)
     prev_stages = (prev or {}).get("stages", {})
 
+    fmt = lambda v: f"{v:.2f}ms" if v is not None else "—"
     lines = [
         f"# Lumen Trace Report\n\n**Run:** {run_dir.name}  "
         f"**Frames:** {frame_count}\n\n",
@@ -243,11 +250,46 @@ def generate_report(trace_path: str, run_dir: Path) -> dict:
         "|---|---|---|---|---|---|---|\n",
     ]
     for name, stats in stages.items():
-        fmt = lambda v: f"{v:.2f}ms" if v is not None else "—"
+        if stats["count"] < 10:
+            continue  # skip meaningless single-event stats
         delta = _delta_str(stats["p50"], (prev_stages.get(name) or {}).get("p50"))
         lines.append(
             f"| {name} | {fmt(stats['p50'])} | {fmt(stats['p95'])} | "
             f"{fmt(stats['p99'])} | {fmt(stats['mean'])} | {stats['count']} | {delta} |\n"
+        )
+
+    # ─── Client latency per topology ─────────────────────────────────────────
+    for topo, section in client_sections.items():
+        cs = section.get("client_stages", {})
+        has_data = any((cs.get(n) or {}).get("count", 0) >= 10 for _, _, n in _CLIENT_STAGE_PAIRS)
+        if not has_data:
+            continue
+        drops = section.get("drops", {})
+        drop_pct = (drops.get("client_drops", 0) / max(drops.get("host_frames", 1), 1)) * 100
+        lines.append(
+            f"\n## Client Latencies ({topo})  "
+            f"drop_rate={drop_pct:.1f}%\n\n"
+            "| Stage | p50 | p95 | p99 | mean | n |\n"
+            "|---|---|---|---|---|---|\n"
+        )
+        for _, _, name in _CLIENT_STAGE_PAIRS:
+            st = cs.get(name, {}) or {}
+            if (st.get("count") or 0) < 10:
+                continue
+            lines.append(
+                f"| {name} | {fmt(st.get('p50'))} | {fmt(st.get('p95'))} | "
+                f"{fmt(st.get('p99'))} | {fmt(st.get('mean'))} | {st.get('count')} |\n"
+            )
+
+    # ─── G2G section ─────────────────────────────────────────────────────────
+    for topo, g in g2g_sections.items():
+        gst = g.get("g2g_ms", {})
+        lines.append(
+            f"\n## Glass-to-Glass ({topo})  n={g.get('frame_count')}\n\n"
+            f"| p50 | p95 | p99 | mean |\n|---|---|---|---|\n"
+            f"| {fmt(gst.get('p50'))} | {fmt(gst.get('p95'))} | "
+            f"{fmt(gst.get('p99'))} | {fmt(gst.get('mean'))} |\n\n"
+            f"**Consistency:** {g.get('consistency_msg')}\n"
         )
 
     md = "".join(lines)
