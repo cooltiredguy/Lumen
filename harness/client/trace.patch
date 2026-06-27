@@ -1,0 +1,208 @@
+diff --git a/app/app.pro b/app/app.pro
+index 740f010..bf75683 100644
+--- a/app/app.pro
++++ b/app/app.pro
+@@ -250,6 +250,7 @@ ffmpeg {
+     DEFINES += HAVE_FFMPEG
+     SOURCES += \
+         streaming/video/ffmpeg.cpp \
++        streaming/video/client_trace.cpp \
+         streaming/video/ffmpeg-renderers/genhwaccel.cpp \
+         streaming/video/ffmpeg-renderers/sdlvid.cpp \
+         streaming/video/ffmpeg-renderers/swframemapper.cpp \
+diff --git a/app/streaming/video/client_trace.cpp b/app/streaming/video/client_trace.cpp
+new file mode 100644
+index 0000000..8fb4c2b
+--- /dev/null
++++ b/app/streaming/video/client_trace.cpp
+@@ -0,0 +1,46 @@
++#include "client_trace.h"
++#include <cstdlib>
++#include <fstream>
++#include <mutex>
++#include <string>
++
++namespace client_trace {
++namespace {
++
++std::once_flag g_init_flag;
++std::ofstream  g_file;
++std::string    g_run_id;
++std::string    g_topology;
++std::mutex     g_mutex;
++bool           g_enabled = false;
++
++void do_init() {
++  const char *path     = std::getenv("MOONLIGHT_TRACE_FILE");
++  if (!path) return;
++  const char *run_id   = std::getenv("MOONLIGHT_TRACE_RUN_ID");
++  const char *topology = std::getenv("MOONLIGHT_TRACE_TOPOLOGY");
++  g_run_id   = run_id   ? run_id   : "unknown";
++  g_topology = topology ? topology : "loopback";
++  g_file.open(path, std::ios::out | std::ios::app);
++  g_enabled = g_file.is_open();
++}
++
++} // anonymous namespace
++
++void emit(int64_t frame_index, const char *stage, uint64_t t_ns,
++          uint64_t fhpl_tenth_ms) {
++  std::call_once(g_init_flag, do_init);
++  if (!g_enabled) return;
++  std::lock_guard<std::mutex> lk(g_mutex);
++  g_file << "{\"run_id\":\"" << g_run_id
++         << "\",\"topology\":\"" << g_topology
++         << "\",\"node\":\"client\""
++         << ",\"frame_index\":" << frame_index
++         << ",\"stage\":\"" << stage << "\""
++         << ",\"t_ns\":" << t_ns
++         << ",\"clock\":\"steady\""
++         << ",\"extra\":{\"fhpl_tenth_ms\":" << fhpl_tenth_ms << "}}\n";
++  g_file.flush();
++}
++
++} // namespace client_trace
+diff --git a/app/streaming/video/client_trace.h b/app/streaming/video/client_trace.h
+new file mode 100644
+index 0000000..93f23bc
+--- /dev/null
++++ b/app/streaming/video/client_trace.h
+@@ -0,0 +1,23 @@
++#pragma once
++#include <chrono>
++#include <cstdint>
++
++// Trace sink for the instrumented moonlight-qt client.
++// Reads MOONLIGHT_TRACE_FILE on first emit. Zero-cost when unset.
++// JSONL format mirrors lumen/src/trace.h; node is always "client".
++// Stage names: "recv", "decode_submit", "decode_done", "present"
++namespace client_trace {
++
++inline uint64_t ns_now() {
++  return static_cast<uint64_t>(
++      std::chrono::steady_clock::now().time_since_epoch().count());
++}
++
++// frame_index  : DECODE_UNIT.frameNumber cast to int64_t
++// stage        : one of the four stage name strings above
++// t_ns         : nanoseconds from ns_now()
++// fhpl_tenth_ms: frameHostProcessingLatency (1/10 ms units); 0 = not provided
++void emit(int64_t frame_index, const char *stage, uint64_t t_ns,
++          uint64_t fhpl_tenth_ms = 0);
++
++} // namespace client_trace
+diff --git a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
+index 2458452..f934af3 100644
+--- a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
++++ b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
+@@ -12,6 +12,7 @@
+ #include <mach/mach_time.h>
+ #include <mach/machine.h>
+ #include <sys/sysctl.h>
++#include "client_trace.h"
+ #import <Cocoa/Cocoa.h>
+ #import <VideoToolbox/VideoToolbox.h>
+ #import <AVFoundation/AVFoundation.h>
+@@ -263,6 +264,9 @@ virtual void setHdrMode(bool enabled) override
+     // Caller frees frame after we return
+     virtual void renderFrame(AVFrame* frame) override
+     { @autoreleasepool {
++        const int64_t ct_frame_num = frame->opaque
++            ? static_cast<int64_t>(reinterpret_cast<intptr_t>(frame->opaque))
++            : -1;
+         OSStatus status;
+         CVPixelBufferRef pixBuf = reinterpret_cast<CVPixelBufferRef>(frame->data[3]);
+ 
+@@ -365,6 +369,9 @@ virtual void renderFrame(AVFrame* frame) override
+             return;
+         }
+ 
++        if (ct_frame_num >= 0) {
++            client_trace::emit(ct_frame_num, "present", client_trace::ns_now());
++        }
+         [m_DisplayLayer enqueueSampleBuffer:sampleBuffer];
+ 
+         CFRelease(sampleBuffer);
+diff --git a/app/streaming/video/ffmpeg-renderers/vt_metal.mm b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
+index 61f15a7..3ee9103 100644
+--- a/app/streaming/video/ffmpeg-renderers/vt_metal.mm
++++ b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
+@@ -21,6 +21,7 @@
+ extern "C" {
+     #include <libavutil/pixdesc.h>
+ }
++#include "client_trace.h"
+ 
+ struct CscParams
+ {
+@@ -481,6 +482,11 @@ bool updateColorSpaceForFrame(AVFrame* frame)
+     // Caller frees frame after we return
+     virtual void renderFrame(AVFrame* frame) override
+     { @autoreleasepool {
++        // --- client trace: extract stashed frameNumber ---
++        const int64_t ct_frame_num = frame->opaque
++            ? static_cast<int64_t>(reinterpret_cast<intptr_t>(frame->opaque))
++            : -1;
++
+         // Handle changes to the frame's colorspace from last time we rendered
+         if (!updateColorSpaceForFrame(frame)) {
+             // Trigger the main thread to recreate the decoder
+@@ -642,6 +648,11 @@ virtual void renderFrame(AVFrame* frame) override
+             }];
+         }
+ 
++        // --- client trace: present ---
++        if (ct_frame_num >= 0) {
++            client_trace::emit(ct_frame_num, "present", client_trace::ns_now());
++        }
++
+         // Flip to the newly rendered buffer
+         [commandBuffer presentDrawable:m_NextDrawable];
+         [commandBuffer commit];
+diff --git a/app/streaming/video/ffmpeg.cpp b/app/streaming/video/ffmpeg.cpp
+index 6e1f806..3fb3976 100644
+--- a/app/streaming/video/ffmpeg.cpp
++++ b/app/streaming/video/ffmpeg.cpp
+@@ -51,6 +51,7 @@ extern "C" {
+ 
+ // This is gross but it allows us to use sizeof()
+ #include "ffmpeg_videosamples.cpp"
++#include "client_trace.h"
+ 
+ #define MAX_DECODER_PASS 2
+ 
+@@ -1661,6 +1662,11 @@ void FFmpegVideoDecoder::decoderThreadProc()
+                     if (!m_FrameInfoQueue.isEmpty()) {
+                         // Data buffers in the DU are not valid here!
+                         DECODE_UNIT du = m_FrameInfoQueue.dequeue();
++                        // --- client trace: decode_done ---
++                        client_trace::emit(static_cast<int64_t>(du.frameNumber), "decode_done",
++                                           client_trace::ns_now());
++                        // stash frameNumber for present-stage trace via frame->opaque
++                        frame->opaque = reinterpret_cast<void *>(static_cast<intptr_t>(du.frameNumber));
+ 
+                         // Count time in avcodec_send_packet() and avcodec_receive_frame()
+                         // as time spent decoding. Also count time spent in the decode unit
+@@ -1740,6 +1746,11 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
+         return DR_NEED_IDR;
+     }
+ 
++    // --- client trace: recv ---
++    client_trace::emit(static_cast<int64_t>(du->frameNumber), "recv",
++                       client_trace::ns_now(),
++                       static_cast<uint64_t>(du->frameHostProcessingLatency));
++
+     if (!m_LastFrameNumber) {
+         m_ActiveWndVideoStats.measurementStartTimestamp = SDL_GetTicks();
+         m_LastFrameNumber = du->frameNumber;
+@@ -1816,6 +1827,10 @@ int FFmpegVideoDecoder::submitDecodeUnit(PDECODE_UNIT du)
+ 
+     m_ActiveWndVideoStats.totalReassemblyTime += du->enqueueTimeMs - du->receiveTimeMs;
+ 
++    // --- client trace: decode_submit ---
++    client_trace::emit(static_cast<int64_t>(du->frameNumber), "decode_submit",
++                       client_trace::ns_now());
++
+     err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
+     if (err < 0) {
+         char errorstring[512];
