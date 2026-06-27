@@ -41,6 +41,8 @@ class TraceSink {
 }
 
 // ─── Block decoder ───────────────────────────────────────────────────────────
+var _diagFrameCount = 0
+
 func decodeCounter(from image: CGImage) -> UInt32? {
     let w = image.width, h = image.height
     guard w > 0, h > 0 else { return nil }
@@ -57,10 +59,53 @@ func decodeCounter(from image: CGImage) -> UInt32? {
         return 0.299 * r + 0.587 * g + 0.114 * b
     }
 
-    // Calibration marker check: top-left corner should be white (>180 luma)
+    // Calibration marker check: any corner white (>180 luma) = workload is visible.
     let markerSize = max(w / 64, 20)
-    let markerCenter = markerSize / 2
-    guard luma(x: markerCenter, y: markerCenter) > 180 else { return nil }
+    let mc = markerSize / 2
+    let tlLuma = luma(x: mc,     y: mc)
+    let trLuma = luma(x: w-mc-1, y: mc)
+    let blLuma = luma(x: mc,     y: h-mc-1)
+    let brLuma = luma(x: w-mc-1, y: h-mc-1)
+    let cxLuma = luma(x: w/2,    y: h/2)
+    // Scan 16×9 grid to locate stream content; track which cell gives gridMax.
+    var gridMax: Double = 0; var gridMaxIx = 0, gridMaxIy = 0
+    let gx = 16, gy = 9
+    for iy in 0..<gy {
+        for ix in 0..<gx {
+            let px = (ix * w) / gx + w / (2 * gx)
+            let py = (iy * h) / gy + h / (2 * gy)
+            let l = luma(x: px, y: py)
+            if l > gridMax { gridMax = l; gridMaxIx = ix; gridMaxIy = iy }
+        }
+    }
+    let markerLuma = max(tlLuma, max(trLuma, max(blLuma, brLuma)))
+
+    // Frame 0: coarse full scan (step=4) to find where bright pixels actually live.
+    // Calibration markers (luma≈250) may not be at display corners if the Moonlight
+    // window is offset within the display.
+    if _diagFrameCount == 0 {
+        var scanMax: Double = 0; var scanMaxX = 0, scanMaxY = 0
+        // Also collect all positions with luma>200 to locate calibration markers.
+        var brightPts: [(Int, Int, Int)] = []
+        for sy in stride(from: 0, to: h, by: 4) {
+            for sx in stride(from: 0, to: w, by: 4) {
+                let l = luma(x: sx, y: sy)
+                if l > scanMax { scanMax = l; scanMaxX = sx; scanMaxY = sy }
+                if l > 200 { brightPts.append((sx, sy, Int(l))) }
+            }
+        }
+        print("[readback] frame0 fullscan: max=\(Int(scanMax)) at (\(scanMaxX),\(scanMaxY)) bright>200: \(brightPts.count) pts")
+        // Print up to 20 bright points to show distribution
+        for pt in brightPts.prefix(20) { print("[readback]   bright (\(pt.0),\(pt.1)) luma=\(pt.2)") }
+    }
+
+    if _diagFrameCount < 5 || _diagFrameCount % 300 == 0 {
+        print("[readback] frame \(_diagFrameCount): \(w)x\(h) "
+            + "tl=\(Int(tlLuma)) tr=\(Int(trLuma)) bl=\(Int(blLuma)) br=\(Int(brLuma)) cx=\(Int(cxLuma)) "
+            + "gridMax=\(Int(gridMax)) at (\(gridMaxIx),\(gridMaxIy))")
+    }
+    _diagFrameCount += 1
+    guard markerLuma > 180 else { return nil }
 
     // Decode block row at y ≈ 10% of height
     let rowY = Int(Double(h) * 0.1) + markerSize / 2
@@ -84,14 +129,43 @@ class ReadbackDelegate: NSObject, SCStreamOutput {
     let sink: TraceSink
     init(sink: TraceSink) { self.sink = sink }
 
+    var _callbackCount = 0
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of outputType: SCStreamOutputType) {
+        if _callbackCount < 3 {
+            print("[readback] callback #\(_callbackCount) type=\(outputType)")
+            _callbackCount += 1
+        }
         guard outputType == .screen else { return }
         let t = ns_now()
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            if _callbackCount <= 3 { print("[readback] nil pixelBuffer") }
+            return
+        }
+
+        // Lock the pixel buffer and build a CGImage directly from its raw bytes
+        // (avoids CIContext/CoreGraphics WindowServer dependency that can assert in headless sessions)
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+        guard let baseAddr = CVPixelBufferGetBaseAddress(pixelBuffer), w > 0, h > 0 else { return }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        let bitsPerComponent = 8
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return }
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGBitmapInfo.byteOrder32Little.rawValue |
+            CGImageAlphaInfo.premultipliedFirst.rawValue)
+        guard let ctx = CGContext(
+            data: baseAddr, width: w, height: h,
+            bitsPerComponent: bitsPerComponent,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue),
+              let cgImage = ctx.makeImage() else { return }
+
         if let id = decodeCounter(from: cgImage) {
             sink.emit(id: id, t_ns: t)
         }
@@ -106,17 +180,20 @@ Task {
     do {
         let content = try await SCShareableContent.excludingDesktopWindows(false,
                                                                            onScreenWindowsOnly: true)
-        guard let moonlightWindow = content.windows.first(where: { w in
-            w.owningApplication?.applicationName.contains("Moonlight") == true ||
-            w.title?.contains("Moonlight") == true
-        }) else {
-            print("[readback] ERROR: Moonlight window not found in SCShareableContent")
-            print("[readback] Available: \(content.windows.map { $0.owningApplication?.applicationName ?? "?" })")
+
+        let mainID = CGMainDisplayID()
+        guard let mainDisplay = content.displays.first(where: { $0.displayID == mainID })
+                             ?? content.displays.first else {
+            print("[readback] ERROR: no display found")
             exit(1)
         }
-        print("[readback] capturing: \(moonlightWindow.title ?? "Moonlight")")
+        print("[readback] capturing display: \(mainDisplay.displayID) \(mainDisplay.width)x\(mainDisplay.height)")
 
-        let filter = SCContentFilter(desktopIndependentWindow: moonlightWindow)
+        // Capture the whole display — Moonlight's rendering window doesn't appear in the
+        // SCK window list (it renders via an IOSurface layer), but its content IS visible
+        // in the display pixels when its Space is active on display 3.
+        let filter = SCContentFilter(display: mainDisplay, excludingWindows: [])
+
         let config = SCStreamConfiguration()
         config.width  = 1920
         config.height = 1080

@@ -95,12 +95,37 @@ def run_loopback_topology(
     remote_trace = f"/tmp/client_loopback_{run_id}.jsonl"
     local_trace  = str(run_dir / "client_loopback.jsonl")
 
-    # Get virtual display ID (written by Lumen to /tmp/sunshine_vd_id on mini)
-    vd_result = minimod.run_remote(ssh_host, brew_prefix,
-        "cat /tmp/sunshine_vd_id 2>/dev/null", check=False)
-    vd_id = vd_result.stdout.strip()
+    # ── Start Moonlight stream FIRST (VD is created when client connects) ──
+    # We need Moonlight to connect before we can get the VD ID.
+    stream_cmd = (
+        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
+        f"MOONLIGHT_TRACE_FILE={remote_trace} "
+        f"MOONLIGHT_TRACE_RUN_ID={run_id} "
+        f"MOONLIGHT_TRACE_TOPOLOGY=loopback "
+        f"{moonlight_bin_mini} stream 127.0.0.1 {client_cfg['app']} "
+        f"--resolution {client_cfg['resolution']} "
+        f"--fps {client_cfg['fps']} "
+        f"--bitrate {client_cfg['bitrate_kbps']} "
+        # borderless: Moonlight fills the physical display in the current Space
+        # without creating a new macOS fullscreen Space. This keeps the display on the
+        # desktop so SCK captures Moonlight's content (not a separate Space's wallpaper).
+        f"--display-mode borderless --no-vsync --no-frame-pacing"
+    )
+    print(f"[topology:loopback] starting client on mini")
+    subprocess.Popen(["ssh", ssh_host, stream_cmd + " &"])
 
-    # ── Start workload via asuser (no TCC needed, just display API) ──────
+    # ── Poll for VD ID (Sunshine creates VD when Moonlight connects) ──────
+    vd_id = ""
+    for _ in range(20):  # up to 10 s
+        time.sleep(0.5)
+        r = minimod.run_remote(ssh_host, brew_prefix,
+            "cat /tmp/sunshine_vd_id 2>/dev/null", check=False)
+        vd_id = r.stdout.strip()
+        if vd_id:
+            break
+    print(f"[topology:loopback] VD ID: {vd_id!r}")
+
+    # ── Start workload on the virtual display ─────────────────────────────
     workload_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenWorkload"
     workload_trace = f"/tmp/workload_{run_id}.jsonl"
     workload_cmd = (
@@ -112,21 +137,6 @@ def run_loopback_topology(
         f"{client_cfg['stream_seconds']}"
     )
     subprocess.Popen(["ssh", ssh_host, workload_cmd + " &"])
-
-    # ── Start Moonlight stream ────────────────────────────────────────────
-    stream_cmd = (
-        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
-        f"MOONLIGHT_TRACE_FILE={remote_trace} "
-        f"MOONLIGHT_TRACE_RUN_ID={run_id} "
-        f"MOONLIGHT_TRACE_TOPOLOGY=loopback "
-        f"{moonlight_bin_mini} stream 127.0.0.1 {client_cfg['app']} "
-        f"--resolution {client_cfg['resolution']} "
-        f"--fps {client_cfg['fps']} "
-        f"--bitrate {client_cfg['bitrate_kbps']} "
-        f"--display-mode windowed --no-vsync --no-frame-pacing"
-    )
-    print(f"[topology:loopback] starting client on mini")
-    subprocess.Popen(["ssh", ssh_host, stream_cmd + " &"])
 
     # ── Start readback via LaunchAgent (launchd direct exec = correct TCC attribution) ──
     # Delay so Moonlight window is up before we search for it
