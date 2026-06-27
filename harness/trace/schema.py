@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 
 @dataclass
@@ -12,6 +13,7 @@ class TraceEvent:
     stage: str
     t_ns: int
     clock: str
+    extra: dict = field(default_factory=dict)
 
     @classmethod
     def from_line(cls, line: str) -> TraceEvent:
@@ -24,10 +26,11 @@ class TraceEvent:
             stage=d["stage"],
             t_ns=d["t_ns"],
             clock=d["clock"],
+            extra=d.get("extra", {}),
         )
 
 
-def parse_trace(path: str) -> list[TraceEvent]:
+def parse_trace(path: str) -> List[TraceEvent]:
     events = []
     with open(path) as f:
         for line in f:
