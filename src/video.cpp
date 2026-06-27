@@ -28,6 +28,7 @@ extern "C" {
 #include "nvenc/nvenc_base.h"
 #include "platform/common.h"
 #include "sync.h"
+#include "trace.h"
 #include "video.h"
 
 #ifdef _WIN32
@@ -1495,6 +1496,7 @@ namespace video {
 
       if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
+        lumen::trace::emit(frame_nr, "encode_done", lumen::trace::ns_now());
       }
 
       packet->replacements = &session.replacements;
@@ -1520,6 +1522,7 @@ namespace video {
     packet->channel_data = channel_data;
     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
     packet->frame_timestamp = frame_timestamp;
+    lumen::trace::emit(frame_nr, "encode_done", lumen::trace::ns_now());
     packets->raise(std::move(packet));
 
     return 0;
@@ -2028,6 +2031,7 @@ namespace video {
       if (!requested_idr_frame || images->peek()) {
         if (auto img = images->pop(max_frametime)) {
           frame_timestamp = img->frame_timestamp;
+          lumen::trace::emit(frame_nr, "capture", lumen::trace::ns_now());
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             return;
@@ -2037,6 +2041,7 @@ namespace video {
         }
       }
 
+      lumen::trace::emit(frame_nr, "encode_submit", lumen::trace::ns_now());
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
