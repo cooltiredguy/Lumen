@@ -130,6 +130,41 @@ def count_frame_drops(events: list, topology: str) -> Dict[str, int]:
     }
 
 
+# ─── Glass-to-glass join ─────────────────────────────────────────────────────
+
+def compute_g2g(
+    paint_events: list,    # [{"id": int, "t_paint_ns": int}]
+    observe_events: list,  # [{"id": int, "t_observe_ns": int}]
+) -> dict:
+    """
+    Join workload and readback events by id.
+    Returns {id: g2g_ns} where g2g_ns = t_observe_ns - t_paint_ns.
+    Only ids present in both lists are included.
+    """
+    paint = {e["id"]: e["t_paint_ns"] for e in paint_events}
+    observe = {e["id"]: e["t_observe_ns"] for e in observe_events}
+    return {
+        id_: observe[id_] - paint[id_]
+        for id_ in paint if id_ in observe
+    }
+
+
+def consistency_check(g2g_ns: float, pipeline_ns: float) -> tuple:
+    """
+    Assert G2G >= summed pipeline (loopback only, shared clock).
+    G2G encompasses paint→capture overhead + host pipeline + network + client pipeline + present→observe overhead.
+    If G2G < pipeline → the join or clock has a bug.
+    Returns (ok: bool, message: str).
+    """
+    if g2g_ns < pipeline_ns:
+        return (False,
+            f"CONSISTENCY BUG: G2G ({g2g_ns/1e6:.2f}ms) < pipeline ({pipeline_ns/1e6:.2f}ms). "
+            "Indicates a frame_index join error or clock mismatch.")
+    gap_ns = g2g_ns - pipeline_ns
+    gap_ms = gap_ns / 1e6
+    return (True, f"OK — G2G overhead (paint→capture + present→observe): {gap_ms:.2f}ms")
+
+
 def _load_prev_report(reports_dir: Path) -> Optional[dict]:
     dirs = sorted(p for p in reports_dir.iterdir() if p.is_dir())
     if len(dirs) < 2:
@@ -165,7 +200,36 @@ def generate_report(trace_path: str, run_dir: Path) -> dict:
             "drops": count_frame_drops(topo_events, topo),
         }
 
-    result = {"stages": stages, "frame_count": frame_count, "client": client_sections}
+    # ─── Glass-to-glass (loopback only) ────────────────────────────────────
+    g2g_sections: dict = {}
+    paint_path   = run_dir / "workload_trace.jsonl"
+    observe_path = run_dir / "readback_loopback.jsonl"
+    if paint_path.exists() and observe_path.exists():
+        paint_evts   = [json.loads(l) for l in paint_path.read_text().splitlines() if l.strip()]
+        observe_evts = [json.loads(l) for l in observe_path.read_text().splitlines() if l.strip()]
+        g2g_map = compute_g2g(paint_evts, observe_evts)
+        if g2g_map:
+            g2g_vals = [float(v) for v in g2g_map.values()]
+            g2g_stats = _percentiles(g2g_vals)
+            # Consistency check: p50 G2G >= p50 host_pipeline + p50 client_pipeline
+            host_p50 = (stages.get("host_pipeline_ms") or {}).get("p50") or 0.0
+            client_p50 = (client_sections.get("loopback", {})
+                          .get("client_stages", {})
+                          .get("client_pipeline_ms") or {}).get("p50") or 0.0
+            total_pipeline_ns = (host_p50 + client_p50) * 1e6
+            ok, msg = consistency_check(
+                g2g_ns=(g2g_stats.get("p50") or 0.0) * 1e6,
+                pipeline_ns=total_pipeline_ns,
+            )
+            g2g_sections["loopback"] = {
+                "g2g_ms": g2g_stats,
+                "frame_count": len(g2g_map),
+                "consistency_ok": ok,
+                "consistency_msg": msg,
+            }
+            print(f"[report] G2G loopback p50={g2g_stats.get('p50'):.2f}ms — {msg}")
+
+    result = {"stages": stages, "frame_count": frame_count, "client": client_sections, "g2g": g2g_sections}
     (run_dir / "report.json").write_text(json.dumps(result, indent=2))
 
     prev = _load_prev_report(run_dir.parent)

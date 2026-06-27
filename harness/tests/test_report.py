@@ -173,3 +173,41 @@ def test_frame_drop_counted():
     drops = count_frame_drops(events, topology="loopback")
     assert drops["client_drops"] == 1
     assert drops["host_frames"] == 2
+
+
+# ─── Task 19: glass-to-glass join and consistency check ──────────────────────
+
+def test_glass_to_glass_join():
+    """id→t_paint joined with id→t_observe gives g2g duration."""
+    from harness.trace.report import compute_g2g
+    paint_events  = [{"id": 5, "t_paint_ns": 1000}]
+    observe_events = [{"id": 5, "t_observe_ns": 5000}]
+    g2g = compute_g2g(paint_events, observe_events)
+    # 5000 - 1000 = 4000 ns
+    assert g2g[5] == pytest.approx(4000, abs=1)
+
+
+def test_g2g_only_includes_matched_ids():
+    """Only ids present in BOTH paint and observe are included."""
+    from harness.trace.report import compute_g2g
+    paint_events   = [{"id": 1, "t_paint_ns": 100}, {"id": 2, "t_paint_ns": 200}]
+    observe_events = [{"id": 1, "t_observe_ns": 500}]
+    g2g = compute_g2g(paint_events, observe_events)
+    assert 1 in g2g
+    assert 2 not in g2g
+
+
+def test_consistency_check_g2g_gte_pipeline():
+    """Loopback: G2G >= summed pipeline means the measurement is self-consistent."""
+    from harness.trace.report import consistency_check
+    ok, msg = consistency_check(g2g_ns=10_000_000, pipeline_ns=8_000_000)
+    assert ok is True
+    assert "OK" in msg
+
+
+def test_consistency_check_g2g_less_than_pipeline_is_bug():
+    """G2G < pipeline is physically impossible (join or clock bug)."""
+    from harness.trace.report import consistency_check
+    ok, msg = consistency_check(g2g_ns=5_000_000, pipeline_ns=8_000_000)
+    assert ok is False
+    assert "BUG" in msg.upper() or "join" in msg.lower()
