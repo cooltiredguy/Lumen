@@ -1,6 +1,7 @@
 #include "trace.h"
 #include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <mutex>
 #include <string>
 
@@ -23,6 +24,9 @@ void do_init() {
   g_topology = topology ? topology : "loopback";
   g_file.open(path, std::ios::out | std::ios::app);
   g_enabled = g_file.is_open();
+  if (!g_enabled) {
+    std::cerr << "[lumen::trace] failed to open trace file: " << path << "\n";
+  }
 }
 
 }  // namespace
@@ -39,6 +43,9 @@ void emit(int64_t frame_index, const char *stage, uint64_t t_ns) {
          << ",\"t_ns\":" << t_ns
          << ",\"clock\":\"steady\"}\n";
   g_file.flush();
+  if (!g_file.good()) {
+    g_enabled = false;
+  }
 }
 
 }  // namespace lumen::trace
