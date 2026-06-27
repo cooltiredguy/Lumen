@@ -46,7 +46,8 @@ def run():
             wifi_trace = run_wifi_topology(cfg, run_id, rundir)
             client_traces.append(("wifi", wifi_trace))
         if "loopback" in topo_order:
-            loop_trace = run_loopback_topology(cfg, run_id, rundir, host, bp)
+            loop_trace = run_loopback_topology(cfg, run_id, rundir, host, bp,
+                                               console_user=user)
             client_traces.append(("loopback", loop_trace))
     finally:
         print("[8/8] teardown")

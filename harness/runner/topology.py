@@ -65,7 +65,8 @@ def run_wifi_topology(cfg: dict, run_id: str, run_dir: Path) -> str:
 
 
 def run_loopback_topology(
-    cfg: dict, run_id: str, run_dir: Path, ssh_host: str, brew_prefix: str
+    cfg: dict, run_id: str, run_dir: Path, ssh_host: str, brew_prefix: str,
+    console_user: str = "hazemeissa"
 ) -> str:
     """
     Loopback topology: client runs on the mini against 127.0.0.1.
@@ -107,7 +108,7 @@ def run_loopback_topology(
     subprocess.Popen(["ssh", ssh_host, readback_cmd + " &"])
 
     stream_cmd = (
-        f"sudo -n launchctl asuser 501 env "
+        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
         f"MOONLIGHT_TRACE_FILE={remote_trace} "
         f"MOONLIGHT_TRACE_RUN_ID={run_id} "
         f"MOONLIGHT_TRACE_TOPOLOGY=loopback "
@@ -122,9 +123,9 @@ def run_loopback_topology(
     subprocess.Popen(["ssh", ssh_host, stream_cmd + " &"])
     time.sleep(client_cfg["stream_seconds"])
 
-    # Kill the client on the mini
+    # Kill the client on the mini (runs as console_user now, so no sudo needed)
     minimod.run_remote(ssh_host, brew_prefix,
-        "pkill -f 'Moonlight.*127.0.0.1' || true", check=False)
+        f"pkill -u {console_user} -f 'Moonlight.*127.0.0.1' || true", check=False)
     time.sleep(2)
 
     # Fetch trace back to dev box
