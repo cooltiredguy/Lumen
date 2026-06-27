@@ -8,6 +8,7 @@ build_dir  = "/Volumes/T7/lumen-harness/Lumen/build"
 identity = "Lumen Dev"          # stable self-signed code-signing identity (Task 7)
 
 [run]
-config_dir = "/Users/hazemeissa/.config/sunshine"   # appdata on the mini (state/creds/log live here)
+config_dir    = "/Users/hazemeissa/.config/sunshine"   # appdata on the mini (state/creds/log live here)
 min_log_level = 0               # 0 = verbose (per-frame Sent Frame seq + debug latency loggers)
-idle_seconds = 20               # how long to let Lumen run in this Plan-1 smoke loop
+idle_seconds  = 20               # how long to let Lumen run in this Plan-1 smoke loop
+trace_dir     = "/Volumes/T7/lumen-harness/traces"
