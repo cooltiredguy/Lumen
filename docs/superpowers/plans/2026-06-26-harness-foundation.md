@@ -263,8 +263,10 @@ Expected: FAIL with `ImportError: cannot import name 'rsync_excludes'`.
 Append to `harness/runner/mini.py`:
 ```python
 def rsync_excludes() -> list[str]:
-    return [".git/", "build/", "harness/reports/", "third-party/*/build/",
-            "*.log", "__pycache__/", ".DS_Store"]
+    # harness/ is dev-box-only (incl. the venv with absolute symlinks); the mini
+    # only needs the Lumen source to build.
+    return [".git/", "build/", "harness/", "harness/reports/", "third-party/*/build/",
+            "*.log", "__pycache__/", ".venv/", ".DS_Store"]
 
 def rsync_deploy(local_dir: str, ssh_host: str, deploy_dir: str) -> subprocess.CompletedProcess:
     args = ["rsync", "-az", "--delete"]

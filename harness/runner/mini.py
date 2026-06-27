@@ -21,8 +21,10 @@ def run_remote_stream(ssh_host: str, brew_prefix: str, cmd: str) -> subprocess.P
 
 
 def rsync_excludes() -> list[str]:
-    return [".git/", "build/", "harness/reports/", "third-party/*/build/",
-            "*.log", "__pycache__/", ".DS_Store"]
+    # harness/ is dev-box-only (incl. the venv with absolute symlinks); the mini
+    # only needs the Lumen source to build.
+    return [".git/", "build/", "harness/", "harness/reports/", "third-party/*/build/",
+            "*.log", "__pycache__/", ".venv/", ".DS_Store"]
 
 
 def rsync_deploy(local_dir: str, ssh_host: str, deploy_dir: str) -> subprocess.CompletedProcess:
