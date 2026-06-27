@@ -17,6 +17,20 @@
 
 ---
 
+## Execution Outcome (2026-06-26) — COMPLETE ✅
+
+`harness/.venv/bin/python -m harness.runner.loop` runs build → sign → Aqua-launch → ScreenCaptureKit-ready → log-capture → teardown end-to-end (exit 0); 18 unit tests pass. Key deltas discovered during execution (the committed code is the source of truth):
+
+- **venv:** harness uses `harness/.venv` (Homebrew Python 3.14 is PEP-668 externally-managed).
+- **sudo:** `launchctl asuser` / `pmset` need root over SSH → one-time `/etc/sudoers.d/lumen-harness` grants passwordless `/bin/launchctl` + `/usr/bin/pmset`.
+- **Launch via LaunchAgent, not `asuser`+bash:** TCC only attaches the Screen Recording grant when launchd execs the binary directly (its own responsible process). Harness writes `~/Library/LaunchAgents/dev.lumen.host.plist` and `sudo launchctl bootstrap gui/<uid>`.
+- **Clean-named, uniquely-identified binary:** build copies `sunshine-0.0.0`→`lumen` (Finder greys dotted names in the TCC picker) and signs it with a **unique** identifier `dev.lumen.host` (upstream `dev.lizardbyte.sunshine` collides with the denied sunshine record). Stable identity ⇒ grant survives rebuilds.
+- **Signing:** stable self-signed cert "Lumen Dev" in a dedicated `lumen.keychain`; unlock + partition-list + codesign must run in one SSH session.
+- **One-time manual step:** grant Screen Recording to `build/lumen` once (durable thereafter).
+- `log_file` is not a valid Lumen config key; logs are captured via the LaunchAgent's `StandardOutPath`.
+
+---
+
 ### Task 1: Scaffold the harness package
 
 **Files:**
