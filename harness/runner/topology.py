@@ -87,7 +87,7 @@ def run_loopback_topology(
     workload_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenWorkload"
     workload_trace = f"/tmp/workload_{run_id}.jsonl"
     workload_cmd = (
-        f"sudo -n launchctl asuser 501 env "
+        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
         f"LUMEN_VIRTUAL_DISPLAY_ID={vd_id} "
         f"LUMEN_WORKLOAD_TRACE_FILE={workload_trace} "
         f"{workload_bin} {cfg['workload']['fps']} "
@@ -99,7 +99,7 @@ def run_loopback_topology(
     readback_bin = "/Volumes/T7/lumen-harness/harness-tools/LumenReadback"
     readback_trace = f"/tmp/readback_loopback_{run_id}.jsonl"
     readback_cmd = (
-        f"sudo -n launchctl asuser 501 env "
+        f"sudo -n launchctl asuser 501 sudo -u {console_user} env "
         f"LUMEN_READBACK_TRACE_FILE={readback_trace} "
         f"LUMEN_READBACK_BITS={cfg['workload']['counter_bits']} "
         f"LUMEN_READBACK_SECONDS={client_cfg['stream_seconds']} "
