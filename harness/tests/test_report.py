@@ -86,3 +86,90 @@ def test_generate_report_writes_files(tmp_path):
         assert data["stages"]["encode_ms"]["count"] == 5
     finally:
         os.unlink(trace_path)
+
+
+# ─── New helpers and tests for Task 8 ─────────────────────────────────────────
+
+def _ev(node, frame_index, stage, t_ns, topology="loopback", extra=None):
+    return TraceEvent(
+        run_id="r1", topology=topology, node=node,
+        frame_index=frame_index, stage=stage, t_ns=t_ns,
+        clock="steady", extra=extra or {}
+    )
+
+
+def test_join_frames_pairs_host_and_client():
+    from harness.trace.report import join_frames
+    events = [
+        _ev("host",   1, "capture",       1000),
+        _ev("host",   1, "encode_submit",  2000),
+        _ev("host",   1, "encode_done",    3000),
+        _ev("host",   1, "send_last",      4000),
+        _ev("client", 1, "recv",           5000),
+        _ev("client", 1, "decode_submit",  6000),
+        _ev("client", 1, "decode_done",    7000),
+        _ev("client", 1, "present",        8000),
+    ]
+    joined = join_frames(events, topology="loopback")
+    assert ("loopback", 1) in joined
+    row = joined[("loopback", 1)]
+    assert row["host"]["capture"] == 1000
+    assert row["client"]["recv"] == 5000
+    assert row["client"]["present"] == 8000
+
+
+def test_compute_client_stages_durations():
+    from harness.trace.report import join_frames, compute_client_stages
+    events = [
+        _ev("client", 1, "recv",          5000),
+        _ev("client", 1, "decode_submit", 6000),
+        _ev("client", 1, "decode_done",   7000),
+        _ev("client", 1, "present",       8000),
+    ]
+    joined = join_frames(events, topology="loopback")
+    durations = compute_client_stages(joined)
+    assert durations["client_recv_to_decode_submit_ms"] is not None
+    assert durations["client_decode_ms"] is not None
+    assert durations["client_present_ms"] is not None
+    assert durations["client_pipeline_ms"] is not None
+
+
+def test_network_span_loopback_exact():
+    """On loopback (shared clock), network = recv(client) - send_last(host)."""
+    from harness.trace.report import join_frames, compute_network_span
+    events = [
+        _ev("host",   1, "send_last", 4000),
+        _ev("client", 1, "recv",      5000),
+    ]
+    joined = join_frames(events, topology="loopback")
+    spans = compute_network_span(joined, topology="loopback")
+    assert spans[("loopback", 1)] == pytest.approx(1000, abs=1)
+
+
+def test_network_span_wifi_returns_empty():
+    """Wi-Fi: cross-machine clocks not subtractable; returns empty dict."""
+    from harness.trace.report import join_frames, compute_network_span
+    events = [
+        _ev("host",   1, "send_last", 4000, topology="wifi"),
+        _ev("client", 1, "recv",      5000, topology="wifi"),
+    ]
+    joined = join_frames(events, topology="wifi")
+    spans = compute_network_span(joined, topology="wifi")
+    assert spans == {}
+
+
+def test_frame_drop_counted():
+    """Frames present in host but missing client rows are counted as drops."""
+    from harness.trace.report import count_frame_drops
+    events = [
+        _ev("host",   1, "capture",  1000),
+        _ev("host",   1, "send_last", 4000),
+        _ev("host",   2, "capture",  5000),
+        _ev("host",   2, "send_last", 8000),
+        # No client events for frame 2 → drop
+        _ev("client", 1, "recv",     5000),
+        _ev("client", 1, "present",  9000),
+    ]
+    drops = count_frame_drops(events, topology="loopback")
+    assert drops["client_drops"] == 1
+    assert drops["host_frames"] == 2

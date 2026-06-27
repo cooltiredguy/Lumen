@@ -2,7 +2,7 @@ from __future__ import annotations
 import json
 import statistics
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 from .schema import TraceEvent, parse_trace
 
 
@@ -47,6 +47,89 @@ def compute_stages(events: list) -> dict:
     return {name: _percentiles(v) for name, v in durations.items()}
 
 
+# ─── Per-topology joined frame map ───────────────────────────────────────────
+
+def join_frames(events: list, topology: str) -> Dict[Tuple[str, int], dict]:
+    """
+    Returns {(topology, frame_index): {"host": {stage: t_ns}, "client": {stage: t_ns}}}
+    for the given topology string. Events from other topologies are ignored.
+    """
+    result: Dict[Tuple[str, int], dict] = {}
+    for e in events:
+        if e.topology != topology:
+            continue
+        key = (e.topology, e.frame_index)
+        row = result.setdefault(key, {"host": {}, "client": {}})
+        row[e.node][e.stage] = e.t_ns
+    return result
+
+
+# ─── Client stage durations ──────────────────────────────────────────────────
+
+_CLIENT_STAGE_PAIRS = [
+    ("recv",          "decode_submit", "client_recv_to_decode_submit_ms"),
+    ("decode_submit", "decode_done",   "client_decode_ms"),
+    ("decode_done",   "present",       "client_present_ms"),
+    ("recv",          "present",       "client_pipeline_ms"),
+]
+
+
+def compute_client_stages(joined: Dict[Tuple[str, int], dict]) -> Dict[str, Optional[dict]]:
+    """Compute per-client-stage duration distributions (ns→ms) across all frames."""
+    raw: Dict[str, List[float]] = {name: [] for _, _, name in _CLIENT_STAGE_PAIRS}
+    for row in joined.values():
+        c = row.get("client", {})
+        for a, b, name in _CLIENT_STAGE_PAIRS:
+            if a in c and b in c:
+                raw[name].append(float(c[b] - c[a]))
+    return {name: _percentiles(vals) for name, vals in raw.items()}
+
+
+# ─── Network span ────────────────────────────────────────────────────────────
+
+def compute_network_span(
+    joined: Dict[Tuple[str, int], dict], topology: str
+) -> Dict[Tuple[str, int], float]:
+    """
+    Returns {(topology, frame_index): network_span_ns} for frames that have both
+    send_last (host) and recv (client).
+
+    Loopback only: shared monotonic clock makes recv - send_last meaningful.
+    Wi-Fi: cross-machine clocks are not comparable; returns empty dict.
+    """
+    if topology != "loopback":
+        return {}
+    spans: Dict[Tuple[str, int], float] = {}
+    for key, row in joined.items():
+        h = row.get("host", {})
+        c = row.get("client", {})
+        if "send_last" in h and "recv" in c:
+            spans[key] = float(c["recv"] - h["send_last"])
+    return spans
+
+
+# ─── Frame-drop count ────────────────────────────────────────────────────────
+
+def count_frame_drops(events: list, topology: str) -> Dict[str, int]:
+    """
+    Returns {"host_frames": N, "client_drops": M} where client_drops is the count
+    of frames with host 'capture' rows but no client 'recv' row in the given topology.
+    """
+    host_frames: set = set()
+    client_frames: set = set()
+    for e in events:
+        if e.topology != topology:
+            continue
+        if e.node == "host" and e.stage == "capture":
+            host_frames.add(e.frame_index)
+        elif e.node == "client" and e.stage == "recv":
+            client_frames.add(e.frame_index)
+    return {
+        "host_frames": len(host_frames),
+        "client_drops": len(host_frames - client_frames),
+    }
+
+
 def _load_prev_report(reports_dir: Path) -> Optional[dict]:
     dirs = sorted(p for p in reports_dir.iterdir() if p.is_dir())
     if len(dirs) < 2:
@@ -70,7 +153,19 @@ def generate_report(trace_path: str, run_dir: Path) -> dict:
     stages = compute_stages(events)
     frame_count = len(set((e.topology, e.frame_index) for e in events))
 
-    result = {"stages": stages, "frame_count": frame_count}
+    # ─── client join (if client events present) ───────────────────────────
+    topologies = list({e.topology for e in events})
+    client_sections: dict = {}
+    for topo in topologies:
+        topo_events = [e for e in events if e.topology == topo]
+        joined = join_frames(topo_events, topo)
+        client_sections[topo] = {
+            "client_stages": compute_client_stages(joined),
+            "network_spans_ns": list(compute_network_span(joined, topo).values()),
+            "drops": count_frame_drops(topo_events, topo),
+        }
+
+    result = {"stages": stages, "frame_count": frame_count, "client": client_sections}
     (run_dir / "report.json").write_text(json.dumps(result, indent=2))
 
     prev = _load_prev_report(run_dir.parent)
