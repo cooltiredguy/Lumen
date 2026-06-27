@@ -11,8 +11,11 @@ from pathlib import Path
 
 def rsync_to_mini(local_path: str, remote_path: str, ssh_host: str) -> None:
     """rsync a file or directory to ssh_host:remote_path."""
+    # Create remote parent dir first; --mkpath is not available on macOS rsync
+    remote_dir = remote_path if remote_path.endswith("/") else str(Path(remote_path).parent)
+    subprocess.run(["ssh", ssh_host, f"mkdir -p {remote_dir}"], check=True)
     cmd = [
-        "rsync", "-avz", "--mkpath",
+        "rsync", "-avz",
         local_path,
         f"{ssh_host}:{remote_path}",
     ]
