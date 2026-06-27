@@ -1,0 +1,13 @@
+[mini]
+ssh_host = "mac-mini"
+brew_prefix = "/opt/homebrew"
+deploy_dir = "/Volumes/T7/lumen-harness/Lumen"
+build_dir  = "/Volumes/T7/lumen-harness/Lumen/build"
+
+[signing]
+identity = "Lumen Dev"          # stable self-signed code-signing identity (Task 7)
+
+[run]
+config_dir = "/Users/hazemeissa/.config/sunshine"   # appdata on the mini (state/creds/log live here)
+min_log_level = 0               # 0 = verbose (per-frame Sent Frame seq + debug latency loggers)
+idle_seconds = 20               # how long to let Lumen run in this Plan-1 smoke loop

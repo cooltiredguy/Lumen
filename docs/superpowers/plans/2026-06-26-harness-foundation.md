@@ -13,7 +13,7 @@
 **Conventions:**
 - All paths absolute. Dev-box repo: `/Users/hazemeissa/Projects/lumen`. Mini deploy dir: `/Volumes/T7/lumen-harness/Lumen`. Mini build dir: `/Volumes/T7/lumen-harness/Lumen/build`. Console UID is resolved at runtime (currently 501).
 - Every `ssh mac-mini` command that touches Homebrew/cmake must be wrapped by `remote_cmd()` (Task 2) so Homebrew is on PATH.
-- Run `pytest` from the repo root: `python3 -m pytest harness/tests -v`.
+- A project venv lives at `harness/.venv` (Homebrew's Python 3.14 is externally-managed / PEP-668). Use it for ALL harness commands, e.g. `harness/.venv/bin/python -m pytest harness/tests -v` and `harness/.venv/bin/python -m harness.runner.loop`, run from the repo root. (Where steps below write `python3`, use the venv python.)
 
 ---
 
