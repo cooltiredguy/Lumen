@@ -30,7 +30,8 @@ def assert_aqua(ssh_host: str, brew_prefix: str, uid: int, user: str) -> None:
 
 
 def launch(ssh_host: str, brew_prefix: str, uid: int, user: str, build_dir: str,
-           conf_path: str, log_file: str, trace_file: str = "", run_id: str = "") -> None:
+           conf_path: str, log_file: str, trace_file: str = "", run_id: str = "",
+           topology: str = "loopback") -> None:
     """Launch lumen as a per-user LaunchAgent so launchd execs it directly (clean
     TCC attribution), inside the console Aqua session."""
     assert_aqua(ssh_host, brew_prefix, uid, user)
@@ -39,7 +40,7 @@ def launch(ssh_host: str, brew_prefix: str, uid: int, user: str, build_dir: str,
                              "SUNSHINE_ASSETS_DIR": f"{build_dir}/assets",
                              "LUMEN_TRACE_FILE":     trace_file,
                              "LUMEN_TRACE_RUN_ID":   run_id,
-                             "LUMEN_TRACE_TOPOLOGY":  "loopback",
+                             "LUMEN_TRACE_TOPOLOGY":  topology,
                          }, log_file)
     path = agent_plist_path(user)
     run_remote(ssh_host, brew_prefix,
