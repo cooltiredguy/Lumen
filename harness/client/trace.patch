@@ -1,5 +1,5 @@
 diff --git a/app/app.pro b/app/app.pro
-index 740f010..bf75683 100644
+index 740f0103..bf75683e 100644
 --- a/app/app.pro
 +++ b/app/app.pro
 @@ -250,6 +250,7 @@ ffmpeg {
@@ -12,7 +12,7 @@ index 740f010..bf75683 100644
          streaming/video/ffmpeg-renderers/swframemapper.cpp \
 diff --git a/app/streaming/video/client_trace.cpp b/app/streaming/video/client_trace.cpp
 new file mode 100644
-index 0000000..ba814df
+index 00000000..1c1c4426
 --- /dev/null
 +++ b/app/streaming/video/client_trace.cpp
 @@ -0,0 +1,48 @@
@@ -47,7 +47,7 @@ index 0000000..ba814df
 +
 +} // anonymous namespace
 +
-+void emit(int64_t frame_index, const char *stage, uint64_t t_ns,
++void record(int64_t frame_index, const char *stage, uint64_t t_ns,
 +          uint64_t fhpl_tenth_ms) {
 +  std::call_once(g_init_flag, do_init);
 +  if (!g_enabled) return;
@@ -66,13 +66,13 @@ index 0000000..ba814df
 +} // namespace client_trace
 diff --git a/app/streaming/video/client_trace.h b/app/streaming/video/client_trace.h
 new file mode 100644
-index 0000000..93f23bc
+index 00000000..011b78f2
 --- /dev/null
 +++ b/app/streaming/video/client_trace.h
 @@ -0,0 +1,23 @@
 +#pragma once
 +#include <chrono>
-+#include <cstdint>
++#include <stdint.h>
 +
 +// Trace sink for the instrumented moonlight-qt client.
 +// Reads MOONLIGHT_TRACE_FILE on first emit. Zero-cost when unset.
@@ -89,19 +89,19 @@ index 0000000..93f23bc
 +// stage        : one of the four stage name strings above
 +// t_ns         : nanoseconds from ns_now()
 +// fhpl_tenth_ms: frameHostProcessingLatency (1/10 ms units); 0 = not provided
-+void emit(int64_t frame_index, const char *stage, uint64_t t_ns,
++void record(int64_t frame_index, const char *stage, uint64_t t_ns,
 +          uint64_t fhpl_tenth_ms = 0);
 +
 +} // namespace client_trace
 diff --git a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
-index 2458452..f934af3 100644
+index 24584527..b1b2d700 100644
 --- a/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
 +++ b/app/streaming/video/ffmpeg-renderers/vt_avsamplelayer.mm
 @@ -12,6 +12,7 @@
  #include <mach/mach_time.h>
  #include <mach/machine.h>
  #include <sys/sysctl.h>
-+#include "client_trace.h"
++#include "../client_trace.h"
  #import <Cocoa/Cocoa.h>
  #import <VideoToolbox/VideoToolbox.h>
  #import <AVFoundation/AVFoundation.h>
@@ -120,20 +120,20 @@ index 2458452..f934af3 100644
          }
  
 +        if (ct_frame_num >= 0) {
-+            client_trace::emit(ct_frame_num, "present", client_trace::ns_now());
++            client_trace::record(ct_frame_num, "present", client_trace::ns_now());
 +        }
          [m_DisplayLayer enqueueSampleBuffer:sampleBuffer];
  
          CFRelease(sampleBuffer);
 diff --git a/app/streaming/video/ffmpeg-renderers/vt_metal.mm b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
-index 61f15a7..3ee9103 100644
+index 61f15a7f..d5ca1eb5 100644
 --- a/app/streaming/video/ffmpeg-renderers/vt_metal.mm
 +++ b/app/streaming/video/ffmpeg-renderers/vt_metal.mm
 @@ -21,6 +21,7 @@
  extern "C" {
      #include <libavutil/pixdesc.h>
  }
-+#include "client_trace.h"
++#include "../client_trace.h"
  
  struct CscParams
  {
@@ -155,14 +155,14 @@ index 61f15a7..3ee9103 100644
  
 +        // --- client trace: present ---
 +        if (ct_frame_num >= 0) {
-+            client_trace::emit(ct_frame_num, "present", client_trace::ns_now());
++            client_trace::record(ct_frame_num, "present", client_trace::ns_now());
 +        }
 +
          // Flip to the newly rendered buffer
          [commandBuffer presentDrawable:m_NextDrawable];
          [commandBuffer commit];
 diff --git a/app/streaming/video/ffmpeg.cpp b/app/streaming/video/ffmpeg.cpp
-index 6e1f806..3fb3976 100644
+index 6e1f8065..52f0195b 100644
 --- a/app/streaming/video/ffmpeg.cpp
 +++ b/app/streaming/video/ffmpeg.cpp
 @@ -51,6 +51,7 @@ extern "C" {
@@ -178,7 +178,7 @@ index 6e1f806..3fb3976 100644
                          // Data buffers in the DU are not valid here!
                          DECODE_UNIT du = m_FrameInfoQueue.dequeue();
 +                        // --- client trace: decode_done ---
-+                        client_trace::emit(static_cast<int64_t>(du.frameNumber), "decode_done",
++                        client_trace::record(static_cast<int64_t>(du.frameNumber), "decode_done",
 +                                           client_trace::ns_now());
 +                        // stash frameNumber for present-stage trace via frame->opaque
 +                        frame->opaque = reinterpret_cast<void *>(static_cast<intptr_t>(du.frameNumber));
@@ -190,7 +190,7 @@ index 6e1f806..3fb3976 100644
      }
  
 +    // --- client trace: recv ---
-+    client_trace::emit(static_cast<int64_t>(du->frameNumber), "recv",
++    client_trace::record(static_cast<int64_t>(du->frameNumber), "recv",
 +                       client_trace::ns_now(),
 +                       static_cast<uint64_t>(du->frameHostProcessingLatency));
 +
@@ -202,7 +202,7 @@ index 6e1f806..3fb3976 100644
      m_ActiveWndVideoStats.totalReassemblyTime += du->enqueueTimeMs - du->receiveTimeMs;
  
 +    // --- client trace: decode_submit ---
-+    client_trace::emit(static_cast<int64_t>(du->frameNumber), "decode_submit",
++    client_trace::record(static_cast<int64_t>(du->frameNumber), "decode_submit",
 +                       client_trace::ns_now());
 +
      err = avcodec_send_packet(m_VideoDecoderCtx, m_Pkt);
