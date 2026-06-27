@@ -212,13 +212,16 @@ Persistent memory for this project lives at:
 
 ## Immediate Next Steps for the Incoming Session
 
+> **If you are Opus:** read the Cyber-Safeguard Strategy section above before dispatching ANY agent. Use `model: "sonnet"` on every Agent tool call. Do your own source reading with Bash/Read (those are fine). Do not use broad security-framed prompts in agents.
+
 1. **Read this file** — you're doing that now ✓
-2. **Read the spec** — `docs/superpowers/specs/2026-06-26-measurement-harness-design.md` for full context
-3. **Plans 1 & 2 are complete and merged to main.**
-4. **Plan 3 is in progress** on branch `instrumented-client-dual-topology`:
-   - Design spec written: `docs/superpowers/specs/2026-06-26-instrumented-client-and-glass-to-glass-design.md`
-   - Implementation plan NOT YET WRITTEN — next step is `superpowers:writing-plans`
-   - Moonlight-qt v6.1.0 (`f786e94`) cloned in scratchpad; partial source research done
-   - Use **Sonnet agents** for remaining source research (see safeguard strategy above)
-5. After Plan 3 → **write and execute Plan 4** (CLAUDE.md + pillar docs)
-6. Milestones ②③④ come after workstream ① is complete
+2. **Plans 1 & 2 are complete and merged to `main`.**
+3. **Plan 3 is in progress on branch `instrumented-client-dual-topology`:**
+   - Design spec committed: `docs/superpowers/specs/2026-06-26-instrumented-client-and-glass-to-glass-design.md`
+   - **Implementation plan NOT YET WRITTEN** — this is the immediate next action
+   - Invoke `superpowers:writing-plans` pointing at the design spec above
+   - Moonlight-qt v6.1.0 (`f786e94`) is cloned at scratchpad (path in strategy section) — use it for source research with Bash/Read in the main thread, or dispatch narrow Sonnet agents that write results to scratchpad files
+   - Source research already completed (in main thread, 2026-06-26): `DECODE_UNIT.frameNumber` is `int` at `Limelight.h:146`; `drSubmitDecodeUnit` → `submitDecodeUnit(du)` at `session.cpp:342`; `FFmpegVideoDecoder::submitDecodeUnit` at `ffmpeg.cpp:1731`; `avcodec_send_packet` at `ffmpeg.cpp:1819`; `m_FrameInfoQueue.enqueue(*du)` at `ffmpeg.cpp:1846` carries frameNumber to the decode thread; macOS renderer is `vt_metal.mm`/`vt_avsamplelayer.mm`
+   - **Still needed for the plan** (do with Bash/Read or Sonnet agents): decode thread loop (`ffmpeg.cpp` ~1560–1710, find avcodec_receive_frame + m_FrameInfoQueue dequeue); macOS present call site (`vt_metal.mm` or `vt_avsamplelayer.mm`); CLI pair/stream/quit flags (`commandlineparser.cpp`); confighttp port + credential source (`confighttp.cpp` ~145–170); virtual display ID (`vd_helper.m`, `virtual_display.m`)
+4. After Plan 3 → **write and execute Plan 4** (CLAUDE.md + pillar docs)
+5. Milestones ②③④ come after workstream ① is complete
