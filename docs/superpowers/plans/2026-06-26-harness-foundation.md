@@ -202,8 +202,9 @@ def console_user_present(ssh_host: str, brew_prefix: str) -> bool:
     return out.strip() not in ("", "loginwindow")
 
 def aqua_session_ready(ssh_host: str, brew_prefix: str, uid: int) -> bool:
+    # asuser needs root; passwordless sudo for /bin/launchctl via sudoers.d (one-time setup)
     out = run_remote(ssh_host, brew_prefix,
-                     f"launchctl asuser {uid} launchctl managername").stdout
+                     f"sudo -n launchctl asuser {uid} launchctl managername").stdout
     return is_aqua(out)
 
 def check_deps(ssh_host: str, brew_prefix: str) -> list[str]:
