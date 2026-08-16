@@ -1,0 +1,54 @@
+name: Build Lumen (Apple Silicon)
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest # Native Apple Silicon on macOS Sequoia
+    steps:
+      - name: Checkout Repository with Submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Homebrew Dependencies
+        run: |
+          brew update
+          brew install \
+            cmake \
+            pkg-config \
+            boost \
+            ffmpeg \
+            openssl@3 \
+            opus \
+            miniupnpc \
+            node \
+            npm
+
+      - name: Set Permissions & Run Install Script
+        run: |
+          chmod +x ./install.sh
+          ./install.sh
+
+      - name: Locate Built Binaries & Bundle
+        run: |
+          mkdir -p dist
+          if [ -d "build" ]; then
+            tar -czvf dist/lumen-macos-arm64.tar.gz -C build .
+          fi
+          if [ -d "build/sunshine.app" ]; then
+            cp -R build/sunshine.app dist/
+          fi
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumen-apple-silicon-build
+          path: dist/
+          retention-days: 14
