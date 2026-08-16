@@ -33,7 +33,7 @@ API_AVAILABLE(macos(12.3))
         self.isCapturing = NO;
 
         dispatch_queue_attr_t qos = dispatch_queue_attr_make_with_qos_class(
-            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, DISPATCH_QUEUE_PRIORITY_HIGH);
+            DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, DISPATCH_QUEUE_PRIORITY_HIGH);
         self.audioQueue = dispatch_queue_create("dev.lizardbyte.sunshine.scAudioQueue", qos);
 
         self.samplesArrivedSignal = [[NSCondition alloc] init];
@@ -190,109 +190,74 @@ API_AVAILABLE(macos(12.3))
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type {
 
-    if (type == SCStreamOutputTypeAudio) {
-        // Get the format description to understand the audio format
-        CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-        if (!formatDesc) {
-            return;
-        }
+    if (type != SCStreamOutputTypeAudio) {
+        return;
+    }
 
-        const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
-        if (!asbd) {
-            return;
-        }
+    CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (!formatDesc) return;
 
-        // Log format on first sample (for debugging)
-        static BOOL formatLogged = NO;
-        if (!formatLogged) {
-            NSLog(@"[SCAudioCapture] Audio format: %.0f Hz, %d channels, %d bits, format flags: 0x%x, non-interleaved: %d",
-                  asbd->mSampleRate, asbd->mChannelsPerFrame, asbd->mBitsPerChannel, asbd->mFormatFlags,
-                  (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0);
-            formatLogged = YES;
-        }
+    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
+    if (!asbd) return;
 
-        BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
-        BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+    BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
 
-        // For non-interleaved audio, we need a larger buffer to hold all channels
-        // Calculate the required buffer size
-        size_t bufferListSize = sizeof(AudioBufferList);
-        if (isNonInterleaved && asbd->mChannelsPerFrame > 1) {
-            // Need space for multiple AudioBuffer structs
-            bufferListSize = sizeof(AudioBufferList) + (asbd->mChannelsPerFrame - 1) * sizeof(AudioBuffer);
-        }
+    // Fast-path check: Only Float32 is supported
+    if (!isFloat || asbd->mBitsPerChannel != 32) {
+        return;
+    }
 
-        // Allocate the buffer list
-        AudioBufferList *audioBufferList = (AudioBufferList *)malloc(bufferListSize);
-        if (!audioBufferList) {
-            return;
-        }
+    // Stack allocate AudioBufferList (handles up to 8 channels without heap malloc)
+    char bufferListStorage[sizeof(AudioBufferList) + (7 * sizeof(AudioBuffer))];
+    AudioBufferList *audioBufferList = (AudioBufferList *)bufferListStorage;
+    size_t bufferListSize = sizeof(bufferListStorage);
 
-        CMBlockBufferRef blockBuffer = NULL;
+    CMBlockBufferRef blockBuffer = NULL;
 
-        OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-            sampleBuffer,
-            &bufferListSize,
-            audioBufferList,
-            bufferListSize,
-            NULL,
-            NULL,
-            kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-            &blockBuffer
-        );
+    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+        sampleBuffer,
+        &bufferListSize,
+        audioBufferList,
+        sizeof(bufferListStorage),
+        NULL,
+        NULL,
+        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+        &blockBuffer
+    );
 
-        if (status == noErr && audioBufferList->mNumberBuffers > 0) {
-            if (isFloat && asbd->mBitsPerChannel == 32) {
-                if (isNonInterleaved && audioBufferList->mNumberBuffers >= 2) {
-                    // Non-interleaved stereo: need to interleave L and R channels
-                    // Buffer 0 = Left channel (L, L, L, ...)
-                    // Buffer 1 = Right channel (R, R, R, ...)
-                    // Output should be: (L, R, L, R, L, R, ...)
+    if (status == noErr && audioBufferList->mNumberBuffers > 0) {
+        if (isNonInterleaved && audioBufferList->mNumberBuffers >= 2) {
+            // Non-interleaved stereo: write directly into circular buffer's head (ZERO-COPY)
+            float *leftChannel = (float *)audioBufferList->mBuffers[0].mData;
+            float *rightChannel = (float *)audioBufferList->mBuffers[1].mData;
+            size_t samplesPerChannel = audioBufferList->mBuffers[0].mDataByteSize / sizeof(float);
+            size_t interleavedByteSize = samplesPerChannel * 2 * sizeof(float);
 
-                    float *leftChannel = (float *)audioBufferList->mBuffers[0].mData;
-                    float *rightChannel = (float *)audioBufferList->mBuffers[1].mData;
-                    size_t samplesPerChannel = audioBufferList->mBuffers[0].mDataByteSize / sizeof(float);
+            int32_t availableBytes = 0;
+            float *dest = (float *)TPCircularBufferHead(&_audioSampleBuffer, &availableBytes);
 
-                    // Allocate interleaved buffer
-                    size_t interleavedSize = samplesPerChannel * 2 * sizeof(float);
-                    float *interleavedData = (float *)malloc(interleavedSize);
-
-                    if (interleavedData && leftChannel && rightChannel) {
-                        for (size_t i = 0; i < samplesPerChannel; i++) {
-                            interleavedData[i * 2] = leftChannel[i];      // Left
-                            interleavedData[i * 2 + 1] = rightChannel[i]; // Right
-                        }
-                        TPCircularBufferProduceBytes(&_audioSampleBuffer, interleavedData, interleavedSize);
-                        free(interleavedData);
-                    }
-                } else {
-                    // Already interleaved Float32 - write directly
-                    AudioBuffer audioBuffer = audioBufferList->mBuffers[0];
-                    if (audioBuffer.mData && audioBuffer.mDataByteSize > 0) {
-                        TPCircularBufferProduceBytes(&_audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
-                    }
+            if (dest && (size_t)availableBytes >= interleavedByteSize && leftChannel && rightChannel) {
+                for (size_t i = 0; i < samplesPerChannel; i++) {
+                    dest[i * 2]     = leftChannel[i];      // Left
+                    dest[i * 2 + 1] = rightChannel[i];     // Right
                 }
-
-                // Signal that samples have arrived
+                TPCircularBufferProduce(&_audioSampleBuffer, (int32_t)interleavedByteSize);
                 [self.samplesArrivedSignal signal];
-            } else {
-                // Unsupported format
-                static BOOL unknownFormatLogged = NO;
-                if (!unknownFormatLogged) {
-                    NSLog(@"[SCAudioCapture] Unsupported audio format: %d bits, float: %d, flags: 0x%x",
-                          asbd->mBitsPerChannel, isFloat, asbd->mFormatFlags);
-                    unknownFormatLogged = YES;
-                }
+            }
+        } else {
+            // Already interleaved Float32 - direct copy to circular buffer
+            AudioBuffer audioBuffer = audioBufferList->mBuffers[0];
+            if (audioBuffer.mData && audioBuffer.mDataByteSize > 0) {
+                TPCircularBufferProduceBytes(&_audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
+                [self.samplesArrivedSignal signal];
             }
         }
-
-        free(audioBufferList);
-
-        if (blockBuffer) {
-            CFRelease(blockBuffer);
-        }
     }
-    // We ignore video frames (type == SCStreamOutputTypeScreen)
+
+    if (blockBuffer) {
+        CFRelease(blockBuffer);
+    }
 }
 
 @end

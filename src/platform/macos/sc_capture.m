@@ -53,7 +53,9 @@ API_AVAILABLE(macos(12.3))
 
         self.displayID = displayID;
         self.frameRate = frameRate;
-        self.pixelFormat = kCVPixelFormatType_32BGRA;
+//        forces NV12 over BGRA for VideoToolbox       
+//        self.pixelFormat = kCVPixelFormatType_32BGRA;
+        self.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         self.captureAudio = captureAudio;
 
         if (mode) {
@@ -183,7 +185,7 @@ API_AVAILABLE(macos(12.3))
         config.height = self.frameHeight;
         config.minimumFrameInterval = CMTimeMake(1, self.frameRate);
         config.pixelFormat = self.pixelFormat;
-        config.queueDepth = 5;
+        config.queueDepth = 3;
         config.showsCursor = YES;
 
         // Enable audio capture - this is the key feature!
