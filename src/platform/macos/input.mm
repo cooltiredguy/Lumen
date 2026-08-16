@@ -12,6 +12,7 @@
 #import <Carbon/Carbon.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 
 // local includes
 #include "src/display_device.h"
@@ -21,6 +22,7 @@
 #include "src/utility.h"
 #include "src/platform/macos/gamepad.h"
 #include "src/platform/macos/hid_gamepad.h"
+#include "src/platform/macos/virtual_display.h"
 
 // Maximum number of gamepads supported
 #define MAX_GAMEPADS 4
@@ -30,6 +32,12 @@
  * @todo Make this configurable.
  */
 constexpr std::chrono::milliseconds MULTICLICK_DELAY_MS(500);
+
+/**
+ * @brief Minimum interval between mouse move dispatches (~300 Hz cap).
+ * Prevents WindowServer event queue starvation at 120 FPS.
+ */
+constexpr std::chrono::microseconds MOUSE_MOVE_MIN_INTERVAL(3300);
 
 namespace platf {
   using namespace std::literals;
@@ -49,7 +57,19 @@ namespace platf {
     // mouse related stuff
     CGEventRef mouse_event {};  // mouse event source
     bool mouse_down[3] {};  // mouse button status
-    std::chrono::steady_clock::steady_clock::time_point last_mouse_event[3][2];  // timestamp of last mouse events
+    std::chrono::steady_clock::time_point last_mouse_event[3][2];  // timestamp of last mouse events
+
+    // High-performance mouse caching & coalescing
+    util::point_t current_mouse_loc {};
+    bool has_mouse_loc {false};
+    int accumulated_deltaX {0};
+    int accumulated_deltaY {0};
+    std::chrono::steady_clock::time_point last_move_post_time {};
+
+    // Cached display bounds to avoid repeated CoreGraphics IPC
+    CGDirectDisplayID cached_display_id {};
+    CGRect cached_display_bounds {};
+    std::chrono::steady_clock::time_point last_bounds_update {};
 
     // gamepad support: HID mode (virtual HID device) with emulation fallback
     bool hid_available {};
@@ -405,17 +425,20 @@ const KeyCodeMap kKeyCodesMap[] = {
     }
   }
 
-  // returns current mouse location:
+  // Returns current mouse location (uses memory cache to avoid synchronous WindowServer IPC)
   util::point_t get_mouse_loc(input_t &input) {
-    // Creating a new event every time to avoid any reuse risk
     const auto macos_input = static_cast<macos_input_t *>(input.get());
+    if (macos_input->has_mouse_loc) {
+      return macos_input->current_mouse_loc;
+    }
+
     const auto snapshot_event = CGEventCreate(macos_input->source);
     const auto current = CGEventGetLocation(snapshot_event);
     CFRelease(snapshot_event);
-    return util::point_t {
-      current.x,
-      current.y
-    };
+
+    macos_input->current_mouse_loc = {current.x, current.y};
+    macos_input->has_mouse_loc = true;
+    return macos_input->current_mouse_loc;
   }
 
   void post_mouse(
@@ -426,8 +449,6 @@ const KeyCodeMap kKeyCodesMap[] = {
     const util::point_t previous_location,
     const int click_count
   ) {
-    BOOST_LOG(debug) << "mouse_event: "sv << button << ", type: "sv << type << ", location:"sv << raw_location.x << ":"sv << raw_location.y << " click_count: "sv << click_count;
-
     const auto macos_input = static_cast<macos_input_t *>(input.get());
     const auto event = macos_input->mouse_event;
 
@@ -435,10 +456,17 @@ const KeyCodeMap kKeyCodesMap[] = {
     auto vd_id = virtual_display_get_id();
     const auto display = vd_id ? (CGDirectDisplayID)vd_id : macos_input->display;
 
-    // get display bounds for current display
-    const CGRect display_bounds = CGDisplayBounds(display);
+    // Use cached bounds (refreshed only when display changes or every 1 sec)
+    const auto now = std::chrono::steady_clock::now();
+    if (display != macos_input->cached_display_id || now - macos_input->last_bounds_update > 1s) {
+      macos_input->cached_display_bounds = CGDisplayBounds(display);
+      macos_input->cached_display_id = display;
+      macos_input->last_bounds_update = now;
+    }
 
-    // limit mouse to current display bounds
+    const CGRect display_bounds = macos_input->cached_display_bounds;
+
+    // Clamp mouse to display bounds
     const auto location = CGPoint {
       std::clamp(raw_location.x, display_bounds.origin.x, display_bounds.origin.x + display_bounds.size.width - 1),
       std::clamp(raw_location.y, display_bounds.origin.y, display_bounds.origin.y + display_bounds.size.height - 1)
@@ -459,6 +487,10 @@ const KeyCodeMap kKeyCodesMap[] = {
     // For why this is here, see:
     // https://stackoverflow.com/questions/15194409/simulated-mouseevent-not-working-properly-osx
     CGWarpMouseCursorPosition(location);
+
+    // Update in-memory cached location
+    macos_input->current_mouse_loc = {location.x, location.y};
+    macos_input->has_mouse_loc = true;
   }
 
   inline CGEventType event_type_mouse(input_t &input) {
@@ -481,9 +513,30 @@ const KeyCodeMap kKeyCodesMap[] = {
     const int deltaX,
     const int deltaY
   ) {
-    const auto current = get_mouse_loc(input);
+    const auto macos_input = static_cast<macos_input_t *>(input.get());
 
-    const auto location = util::point_t {current.x + deltaX, current.y + deltaY};
+    // Accumulate deltas to maintain exact sub-pixel movement linearity
+    macos_input->accumulated_deltaX += deltaX;
+    macos_input->accumulated_deltaY += deltaY;
+
+    const auto now = std::chrono::steady_clock::now();
+    bool is_dragging = macos_input->mouse_down[0] || macos_input->mouse_down[1] || macos_input->mouse_down[2];
+
+    // Cap movement updates to ~300 Hz when not dragging to prevent WindowServer starvation
+    if (!is_dragging && (now - macos_input->last_move_post_time < MOUSE_MOVE_MIN_INTERVAL)) {
+      return;
+    }
+
+    const auto current = get_mouse_loc(input);
+    const auto location = util::point_t {
+      current.x + macos_input->accumulated_deltaX,
+      current.y + macos_input->accumulated_deltaY
+    };
+
+    macos_input->accumulated_deltaX = 0;
+    macos_input->accumulated_deltaY = 0;
+    macos_input->last_move_post_time = now;
+
     post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), location, current, 0);
   }
 
@@ -494,19 +547,32 @@ const KeyCodeMap kKeyCodesMap[] = {
     const float y
   ) {
     const auto macos_input = static_cast<macos_input_t *>(input.get());
+    const auto now = std::chrono::steady_clock::now();
+    bool is_dragging = macos_input->mouse_down[0] || macos_input->mouse_down[1] || macos_input->mouse_down[2];
+
+    if (!is_dragging && (now - macos_input->last_move_post_time < MOUSE_MOVE_MIN_INTERVAL)) {
+      return;
+    }
+    macos_input->last_move_post_time = now;
+
     const auto scaling = macos_input->displayScaling;
 
     // Use virtual display if one is active, otherwise use configured display
     auto vd_id = virtual_display_get_id();
     const auto display = vd_id ? (CGDirectDisplayID)vd_id : macos_input->display;
 
-    auto location = util::point_t {x * scaling, y * scaling};
-    CGRect display_bounds = CGDisplayBounds(display);
-    // in order to get the correct mouse location for capturing display , we need to add the display bounds to the location
-    location.x += display_bounds.origin.x;
-    location.y += display_bounds.origin.y;
+    if (display != macos_input->cached_display_id || now - macos_input->last_bounds_update > 1s) {
+      macos_input->cached_display_bounds = CGDisplayBounds(display);
+      macos_input->cached_display_id = display;
+      macos_input->last_bounds_update = now;
+    }
 
-    post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), location, get_mouse_loc(input), 0);
+    auto location = util::point_t {x * scaling, y * scaling};
+    location.x += macos_input->cached_display_bounds.origin.x;
+    location.y += macos_input->cached_display_bounds.origin.y;
+
+    const auto current = get_mouse_loc(input);
+    post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), location, current, 0);
   }
 
   void button_mouse(input_t &input, const int button, const bool release) {
@@ -531,6 +597,18 @@ const KeyCodeMap kKeyCodesMap[] = {
       default:
         BOOST_LOG(warning) << "Unsupported mouse button for MacOS: "sv << button;
         return;
+    }
+
+    // Flush any pending movement delta so click registers at the exact cursor position
+    if (macos_input->accumulated_deltaX != 0 || macos_input->accumulated_deltaY != 0) {
+      const auto current = get_mouse_loc(input);
+      const auto loc = util::point_t {
+        current.x + macos_input->accumulated_deltaX,
+        current.y + macos_input->accumulated_deltaY
+      };
+      macos_input->accumulated_deltaX = 0;
+      macos_input->accumulated_deltaY = 0;
+      post_mouse(input, kCGMouseButtonLeft, event_type_mouse(input), loc, current, 0);
     }
 
     macos_input->mouse_down[mac_button] = !release;
@@ -574,63 +652,19 @@ const KeyCodeMap kKeyCodesMap[] = {
     return nullptr;
   }
 
-  /**
-   * @brief Sends a touch event to the OS.
-   * @param input The client-specific input context.
-   * @param touch_port The current viewport for translating to screen coordinates.
-   * @param touch The touch event.
-   */
-  void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {
-    // Unimplemented feature - platform_caps::pen_touch
-  }
-
-  /**
-   * @brief Sends a pen event to the OS.
-   * @param input The client-specific input context.
-   * @param touch_port The current viewport for translating to screen coordinates.
-   * @param pen The pen event.
-   */
-  void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {
-    // Unimplemented feature - platform_caps::pen_touch
-  }
-
-  /**
-   * @brief Sends a gamepad touch event to the OS.
-   * @param input The global input context.
-   * @param touch The touch event.
-   */
-  void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {
-    // Unimplemented feature - platform_caps::controller_touch
-  }
-
-  /**
-   * @brief Sends a gamepad motion event to the OS.
-   * @param input The global input context.
-   * @param motion The motion event.
-   */
-  void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {
-    // Unimplemented
-  }
-
-  /**
-   * @brief Sends a gamepad battery event to the OS.
-   * @param input The global input context.
-   * @param battery The battery event.
-   */
-  void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {
-    // Unimplemented
-  }
+  void touch_update(client_input_t *input, const touch_port_t &touch_port, const touch_input_t &touch) {}
+  void pen_update(client_input_t *input, const touch_port_t &touch_port, const pen_input_t &pen) {}
+  void gamepad_touch(input_t &input, const gamepad_touch_t &touch) {}
+  void gamepad_motion(input_t &input, const gamepad_motion_t &motion) {}
+  void gamepad_battery(input_t &input, const gamepad_battery_t &battery) {}
 
   input_t input() {
     input_t result {new macos_input_t()};
-
     const auto macos_input = static_cast<macos_input_t *>(result.get());
 
-    // Default to main display
     macos_input->display = CGMainDisplayID();
 
     auto output_name = display_device::map_output_name(config::video.output_name);
-    // If output_name is set, try to find the display with that display id
     if (!output_name.empty()) {
       const int MAX_DISPLAYS = 32;
       uint32_t max_display = MAX_DISPLAYS;
@@ -648,13 +682,11 @@ const KeyCodeMap kKeyCodesMap[] = {
       }
     }
 
-    // Input coordinates are based on the virtual resolution not the physical, so we need the scaling factor
     const CGDisplayModeRef mode = CGDisplayCopyDisplayMode(macos_input->display);
     macos_input->displayScaling = ((CGFloat) CGDisplayPixelsWide(macos_input->display)) / ((CGFloat) CGDisplayModeGetPixelWidth(mode));
     CFRelease(mode);
 
     macos_input->source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-
     macos_input->kb_event = CGEventCreate(macos_input->source);
     macos_input->kb_flags = 0;
 
@@ -662,6 +694,10 @@ const KeyCodeMap kKeyCodesMap[] = {
     macos_input->mouse_down[0] = false;
     macos_input->mouse_down[1] = false;
     macos_input->mouse_down[2] = false;
+
+    macos_input->cached_display_id = macos_input->display;
+    macos_input->cached_display_bounds = CGDisplayBounds(macos_input->display);
+    macos_input->last_bounds_update = std::chrono::steady_clock::now();
 
     // Probe HID virtual gamepad support (requires SIP disabled)
     macos_input->hid_available = [HIDGamepad isAvailable];
