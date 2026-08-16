@@ -57,7 +57,7 @@ API_AVAILABLE(macos(12.3))
         self.frameRate = frameRate;
 //        forces NV12 over BGRA for VideoToolbox       
 //        self.pixelFormat = kCVPixelFormatType_32BGRA;
-        self.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        self.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
         self.captureAudio = captureAudio;
 
         if (mode) {
