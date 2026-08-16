@@ -9,15 +9,17 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /**
  * @brief Create a virtual display with the specified resolution and refresh rate.
  * @param width Display width in pixels.
  * @param height Display height in pixels.
  * @param fps Refresh rate in Hz.
+ * @param retina true for Retina (HiDPI), false for 1x unscaled.
  * @return The CGDirectDisplayID of the created display, or 0 on failure.
  */
-uint32_t virtual_display_create(int width, int height, int fps);
+uint32_t virtual_display_create(int width, int height, int fps, bool retina);
 
 /**
  * @brief Destroy the currently active virtual display.

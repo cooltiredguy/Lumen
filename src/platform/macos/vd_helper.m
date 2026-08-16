@@ -152,7 +152,7 @@ static void forceExtendMode(CGDirectDisplayID virtualID) {
 
 int main(int argc, const char *argv[]) {
   @autoreleasepool {
-    if (argc != 4) {
+    if (argc < 4 || argc > 5) {
       fprintf(stdout, "0\n");
       fflush(stdout);
       return 1;
@@ -161,6 +161,8 @@ int main(int argc, const char *argv[]) {
     int width = atoi(argv[1]);
     int height = atoi(argv[2]);
     int fps = atoi(argv[3]);
+    // 4th arg: 1 for Retina (HiDPI), 0 for native 1x (defaults to 1 if omitted)
+    int enable_retina = (argc >= 5) ? atoi(argv[4]) : 1;
 
     if (width <= 0 || height <= 0 || fps <= 0) {
       fprintf(stdout, "0\n");
@@ -290,7 +292,7 @@ int main(int argc, const char *argv[]) {
     // The display starts as retina 2x (logical=half, pixel=full).
     // For streaming, we want native 1x (logical=full, pixel=full) to avoid
     // compositor overhead that causes latency and FPS drops.
-    {
+    if (!enable_retina) {
       NSDictionary *opts = @{(NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
       CFArrayRef allModes = CGDisplayCopyAllDisplayModes(resultID, (CFDictionaryRef)opts);
       if (allModes) {
@@ -311,15 +313,13 @@ int main(int argc, const char *argv[]) {
         if (nativeMode) {
           CGError modeErr = CGDisplaySetDisplayMode(resultID, nativeMode, NULL);
           fprintf(stderr, "[vd_helper] Switched to native %dx%d (1x scale): %d\n", width, height, modeErr);
-        } else {
-          fprintf(stderr, "[vd_helper] Native %dx%d mode not found, staying at retina 2x\n", width, height);
         }
         CFRelease(allModes);
       }
+      usleep(500000); // 500ms
+    } else {
+      fprintf(stderr, "[vd_helper] Keeping Retina 2x (HiDPI) scale enabled\n");
     }
-
-    // Wait for mode switch to take effect
-    usleep(500000); // 500ms
 
     // Step 3: If still not visible, try again after a longer wait
     uint32_t count = 0;

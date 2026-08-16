@@ -40,7 +40,7 @@ static NSString *helperPath(void) {
   return [dir stringByAppendingPathComponent:@"vd_helper"];
 }
 
-uint32_t virtual_display_create(int width, int height, int fps) {
+uint32_t virtual_display_create(int width, int height, int fps, bool retina) {
   pthread_mutex_lock(&vd_mutex);
 
   // Destroy existing display first
@@ -78,16 +78,18 @@ uint32_t virtual_display_create(int width, int height, int fps) {
   }
 
   // Build argv
-  char widthStr[16], heightStr[16], fpsStr[16];
+  char widthStr[16], heightStr[16], fpsStr[16], retinaStr[8];
   snprintf(widthStr, sizeof(widthStr), "%d", width);
   snprintf(heightStr, sizeof(heightStr), "%d", height);
   snprintf(fpsStr, sizeof(fpsStr), "%d", fps);
+  snprintf(retinaStr, sizeof(retinaStr), "%d", retina ? 1 : 0);
 
   const char *argv[] = {
     [helper fileSystemRepresentation],
     widthStr,
     heightStr,
     fpsStr,
+    retinaStr
     NULL
   };
 
