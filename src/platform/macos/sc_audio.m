@@ -190,73 +190,68 @@ API_AVAILABLE(macos(12.3))
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
                    ofType:(SCStreamOutputType)type {
 
-    if (type != SCStreamOutputTypeAudio) {
-        return;
-    }
+    if (type == SCStreamOutputTypeAudio) {
+        CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+        if (!formatDesc) return;
 
-    CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
-    if (!formatDesc) return;
+        const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
+        if (!asbd) return;
 
-    const AudioStreamBasicDescription *asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
-    if (!asbd) return;
+        BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
 
-    BOOL isFloat = (asbd->mFormatFlags & kAudioFormatFlagIsFloat) != 0;
-    BOOL isNonInterleaved = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+        // Allocate AudioBufferList on stack for up to 8 channels
+        char bufferListStorage[sizeof(AudioBufferList) + 7 * sizeof(AudioBuffer)];
+        AudioBufferList *audioBufferList = (AudioBufferList *)bufferListStorage;
+        size_t bufferListSize = sizeof(bufferListStorage);
 
-    // Fast-path check: Only Float32 is supported
-    if (!isFloat || asbd->mBitsPerChannel != 32) {
-        return;
-    }
+        CMBlockBufferRef blockBuffer = NULL;
+        OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            &bufferListSize,
+            audioBufferList,
+            bufferListSize,
+            NULL,
+            NULL,
+            kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            &blockBuffer
+        );
 
-    // Stack allocate AudioBufferList (handles up to 8 channels without heap malloc)
-    char bufferListStorage[sizeof(AudioBufferList) + (7 * sizeof(AudioBuffer))];
-    AudioBufferList *audioBufferList = (AudioBufferList *)bufferListStorage;
-    size_t bufferListSize = sizeof(bufferListStorage);
+        if (status == noErr && audioBufferList->mNumberBuffers > 0) {
+            if (isFloat && asbd->mBitsPerChannel == 32) {
+                if (isNonInterleaved && audioBufferList->mNumberBuffers >= 2) {
+                    float *leftChannel = (float *)audioBufferList->mBuffers[0].mData;
+                    float *rightChannel = (float *)audioBufferList->mBuffers[1].mData;
+                    size_t samplesPerChannel = audioBufferList->mBuffers[0].mDataByteSize / sizeof(float);
 
-    CMBlockBufferRef blockBuffer = NULL;
+                    // Stack-allocate for typical frame sizes (up to 2048 samples)
+                    float stackBuffer[4096];
+                    float *interleavedData = (samplesPerChannel * 2 <= 4096) ? stackBuffer : (float *)malloc(samplesPerChannel * 2 * sizeof(float));
 
-    OSStatus status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-        sampleBuffer,
-        &bufferListSize,
-        audioBufferList,
-        sizeof(bufferListStorage),
-        NULL,
-        NULL,
-        kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
-        &blockBuffer
-    );
+                    if (leftChannel && rightChannel) {
+                        for (size_t i = 0; i < samplesPerChannel; i++) {
+                            interleavedData[i * 2]     = leftChannel[i];
+                            interleavedData[i * 2 + 1] = rightChannel[i];
+                        }
+                        TPCircularBufferProduceBytes(&_audioSampleBuffer, interleavedData, samplesPerChannel * 2 * sizeof(float));
+                    }
 
-    if (status == noErr && audioBufferList->mNumberBuffers > 0) {
-        if (isNonInterleaved && audioBufferList->mNumberBuffers >= 2) {
-            // Non-interleaved stereo: write directly into circular buffer's head (ZERO-COPY)
-            float *leftChannel = (float *)audioBufferList->mBuffers[0].mData;
-            float *rightChannel = (float *)audioBufferList->mBuffers[1].mData;
-            size_t samplesPerChannel = audioBufferList->mBuffers[0].mDataByteSize / sizeof(float);
-            size_t interleavedByteSize = samplesPerChannel * 2 * sizeof(float);
-
-            int32_t availableBytes = 0;
-            float *dest = (float *)TPCircularBufferHead(&_audioSampleBuffer, &availableBytes);
-
-            if (dest && (size_t)availableBytes >= interleavedByteSize && leftChannel && rightChannel) {
-                for (size_t i = 0; i < samplesPerChannel; i++) {
-                    dest[i * 2]     = leftChannel[i];      // Left
-                    dest[i * 2 + 1] = rightChannel[i];     // Right
+                    if (interleavedData != stackBuffer) {
+                        free(interleavedData);
+                    }
+                } else {
+                    AudioBuffer audioBuffer = audioBufferList->mBuffers[0];
+                    if (audioBuffer.mData && audioBuffer.mDataByteSize > 0) {
+                        TPCircularBufferProduceBytes(&_audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
+                    }
                 }
-                TPCircularBufferProduce(&_audioSampleBuffer, (int32_t)interleavedByteSize);
-                [self.samplesArrivedSignal signal];
-            }
-        } else {
-            // Already interleaved Float32 - direct copy to circular buffer
-            AudioBuffer audioBuffer = audioBufferList->mBuffers[0];
-            if (audioBuffer.mData && audioBuffer.mDataByteSize > 0) {
-                TPCircularBufferProduceBytes(&_audioSampleBuffer, audioBuffer.mData, audioBuffer.mDataByteSize);
                 [self.samplesArrivedSignal signal];
             }
         }
-    }
 
-    if (blockBuffer) {
-        CFRelease(blockBuffer);
+        if (blockBuffer) {
+            CFRelease(blockBuffer);
+        }
     }
 }
 

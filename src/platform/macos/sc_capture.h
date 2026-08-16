@@ -5,13 +5,15 @@
  */
 #pragma once
 
+#import <os/lock.h>
 #import <AppKit/AppKit.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <CoreMedia/CoreMedia.h>
 
 API_AVAILABLE(macos(12.3))
-@interface SCCapture : NSObject <SCStreamDelegate, SCStreamOutput>
-
+@interface SCCapture : NSObject <SCStreamDelegate, SCStreamOutput> {
+    os_unfair_lock _captureLock;
+}
 #define kMaxDisplays 32
 
 @property (nonatomic, assign) CGDirectDisplayID displayID;

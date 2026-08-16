@@ -29,14 +29,9 @@ namespace platf {
   struct av_pixel_buf_t {
     CVPixelBufferRef buf;
 
-    // Constructor
+    // Constructor - zero-copy, do not lock base address to avoid CPU cache flushes
     explicit av_pixel_buf_t(CMSampleBufferRef sb):
-        buf(
-          CMSampleBufferGetImageBuffer(sb)
-        ) {
-      if (buf) {
-        CVPixelBufferLockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
-      }
+        buf(CMSampleBufferGetImageBuffer(sb)) {
     }
 
     [[nodiscard]] uint8_t *data() const {
@@ -44,11 +39,7 @@ namespace platf {
     }
 
     // Destructor
-    ~av_pixel_buf_t() {
-      if (buf != nullptr) {
-        CVPixelBufferUnlockBaseAddress(buf, kCVPixelBufferLock_ReadOnly);
-      }
-    }
+    ~av_pixel_buf_t() = default;
   };
 
   struct av_img_t: img_t {

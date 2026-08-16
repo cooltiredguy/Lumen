@@ -49,6 +49,8 @@ API_AVAILABLE(macos(12.3))
                    captureAudio:(BOOL)captureAudio {
     self = [super init];
     if (self) {
+        _captureLock = OS_UNFAIR_LOCK_INIT;
+
         CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
 
         self.displayID = displayID;
@@ -154,132 +156,130 @@ API_AVAILABLE(macos(12.3))
 
 - (dispatch_semaphore_t)captureVideo:(VideoFrameCallbackBlock)videoCallback
                        audioCallback:(AudioSampleCallbackBlock)audioCallback {
-    @synchronized(self) {
-        // Stop any existing capture before starting a new one
-        if (self.stream) {
-            dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
-            [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
-                dispatch_semaphore_signal(stopSem);
-            }];
-            dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
-            self.stream = nil;
-        }
+    // Stop any existing capture before starting a new one
+    if (self.stream) {
+        dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
+        [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
+            dispatch_semaphore_signal(stopSem);
+        }];
+        dispatch_semaphore_wait(stopSem, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        self.stream = nil;
+    }
 
         self.stopping = NO;  // Reset stopping flag for new capture cycle
-        self.videoCallback = videoCallback;
-        self.audioCallback = audioCallback;
-        self.captureSignal = dispatch_semaphore_create(0);
+    self.videoCallback = videoCallback;
+    self.audioCallback = audioCallback;
+    self.captureSignal = dispatch_semaphore_create(0);
 
-        SCDisplay *display = [self findDisplayWithIDRetrying:self.displayID];
-        if (!display) {
-            NSLog(@"[SCCapture] Display not found after retries: %u", self.displayID);
-            return nil;
-        }
+    SCDisplay *display = [self findDisplayWithIDRetrying:self.displayID];
+    if (!display) {
+        NSLog(@"[SCCapture] Display not found after retries: %u", self.displayID);
+        return nil;
+    }
 
-        // Create content filter for the display
-        SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+    // Create content filter for the display
+    SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
 
-        // Configure the stream
-        SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-        config.width = self.frameWidth;
-        config.height = self.frameHeight;
-        config.minimumFrameInterval = CMTimeMake(1, self.frameRate);
-        config.pixelFormat = self.pixelFormat;
-        config.queueDepth = 3;
-        config.showsCursor = YES;
+    // Configure the stream
+    SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
+    config.width = self.frameWidth;
+    config.height = self.frameHeight;
+    config.minimumFrameInterval = CMTimeMake(1, self.frameRate);
+    config.pixelFormat = self.pixelFormat;
+    config.queueDepth = 2;  // Low latency: 1 buffer in flight
+    config.showsCursor = YES;
 
         // Enable audio capture - this is the key feature!
-        if (self.captureAudio) {
-            config.capturesAudio = YES;
+    if (self.captureAudio) {
+        config.capturesAudio = YES;
             config.excludesCurrentProcessAudio = YES;  // Don't capture our own audio
-            config.sampleRate = 48000;
-            config.channelCount = 2;
-        }
+        config.sampleRate = 48000;
+        config.channelCount = 2;
+    }
 
         // Create and configure the stream
-        NSError *error = nil;
-        self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
+    NSError *error = nil;
+    self.stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:self];
 
-        if (!self.stream) {
-            NSLog(@"[SCCapture] Failed to create SCStream");
-            return nil;
-        }
-
-        // Add video output
-        if (![self.stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.videoQueue error:&error]) {
-            NSLog(@"[SCCapture] Failed to add video output: %@", error.localizedDescription);
-            return nil;
-        }
-
-        // Add audio output if enabled
-        if (self.captureAudio) {
-            if (![self.stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.audioQueue error:&error]) {
-                NSLog(@"[SCCapture] Failed to add audio output: %@", error.localizedDescription);
-                // Continue without audio - video is more important
-            } else {
-                NSLog(@"[SCCapture] System audio capture enabled!");
-            }
-        }
-
-        // Start capture
-        dispatch_semaphore_t startSemaphore = dispatch_semaphore_create(0);
-        __block BOOL startSuccess = NO;
-
-        [self.stream startCaptureWithCompletionHandler:^(NSError *error) {
-            if (error) {
-                NSLog(@"[SCCapture] Failed to start capture: %@", error.localizedDescription);
-            } else {
-                NSLog(@"[SCCapture] Capture started successfully with%@ audio", self.captureAudio ? @"" : @"out");
-                startSuccess = YES;
-            }
-            dispatch_semaphore_signal(startSemaphore);
-        }];
-
-        dispatch_semaphore_wait(startSemaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
-
-        if (!startSuccess) {
-            return nil;
-        }
-
-        return self.captureSignal;
+    if (!self.stream) {
+        NSLog(@"[SCCapture] Failed to create SCStream");
+        return nil;
     }
+
+    // Add video output
+    if (![self.stream addStreamOutput:self type:SCStreamOutputTypeScreen sampleHandlerQueue:self.videoQueue error:&error]) {
+        NSLog(@"[SCCapture] Failed to add video output: %@", error.localizedDescription);
+        return nil;
+    }
+
+    // Add audio output if enabled
+    if (self.captureAudio) {
+        if (![self.stream addStreamOutput:self type:SCStreamOutputTypeAudio sampleHandlerQueue:self.audioQueue error:&error]) {
+            NSLog(@"[SCCapture] Failed to add audio output: %@", error.localizedDescription);
+                // Continue without audio - video is more important
+        } else {
+            NSLog(@"[SCCapture] System audio capture enabled!");
+        }
+    }
+
+    // Start capture
+    dispatch_semaphore_t startSemaphore = dispatch_semaphore_create(0);
+    __block BOOL startSuccess = NO;
+
+    [self.stream startCaptureWithCompletionHandler:^(NSError *error) {
+        if (error) {
+            NSLog(@"[SCCapture] Failed to start capture: %@", error.localizedDescription);
+        } else {
+            NSLog(@"[SCCapture] Capture started successfully with%@ audio", self.captureAudio ? @"" : @"out");
+            startSuccess = YES;
+        }
+        dispatch_semaphore_signal(startSemaphore);
+    }];
+
+    dispatch_semaphore_wait(startSemaphore, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+
+    if (!startSuccess) {
+        return nil;
+    }
+
+    return self.captureSignal;
 }
 
 - (void)stopCapture {
-    @synchronized(self) {
-        // Cancel the frame delivery timer first
-        if (self.frameDeliveryTimer) {
-            dispatch_source_cancel(self.frameDeliveryTimer);
-            self.frameDeliveryTimer = nil;
-        }
-
-        if (self.stream) {
-            dispatch_semaphore_t stopSemaphore = dispatch_semaphore_create(0);
-
-            [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
-                if (error) {
-                    NSLog(@"[SCCapture] Error stopping capture: %@", error.localizedDescription);
-                }
-                dispatch_semaphore_signal(stopSemaphore);
-            }];
-
-            dispatch_semaphore_wait(stopSemaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
-            self.stream = nil;
-        }
-
-        if (self.captureSignal) {
-            dispatch_semaphore_signal(self.captureSignal);
-            self.captureSignal = nil;
-        }
-
-        self.videoCallback = nil;
-        self.audioCallback = nil;
-
-        if (self.lastValidSampleBuffer) {
-            CFRelease(self.lastValidSampleBuffer);
-            self.lastValidSampleBuffer = NULL;
-        }
+    // Cancel the frame delivery timer first
+    if (self.frameDeliveryTimer) {
+        dispatch_source_cancel(self.frameDeliveryTimer);
+        self.frameDeliveryTimer = nil;
     }
+
+    if (self.stream) {
+        dispatch_semaphore_t stopSemaphore = dispatch_semaphore_create(0);
+
+        [self.stream stopCaptureWithCompletionHandler:^(NSError *error) {
+            if (error) {
+                NSLog(@"[SCCapture] Error stopping capture: %@", error.localizedDescription);
+            }
+            dispatch_semaphore_signal(stopSemaphore);
+        }];
+
+        dispatch_semaphore_wait(stopSemaphore, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
+        self.stream = nil;
+    }
+
+    if (self.captureSignal) {
+        dispatch_semaphore_signal(self.captureSignal);
+        self.captureSignal = nil;
+    }
+
+    self.videoCallback = nil;
+    self.audioCallback = nil;
+
+    os_unfair_lock_lock(&_captureLock);
+    if (self.lastValidSampleBuffer) {
+        CFRelease(self.lastValidSampleBuffer);
+        self.lastValidSampleBuffer = NULL;
+    }
+    os_unfair_lock_unlock(&_captureLock);
 }
 
 #pragma mark - SCStreamDelegate
@@ -299,23 +299,32 @@ API_AVAILABLE(macos(12.3))
 
     if (type == SCStreamOutputTypeScreen) {
         CVPixelBufferRef pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer);
+        
         if (!pixelBuffer) {
             // Null frame — re-deliver cached frame to fill gaps
-            @synchronized(self) {
-                if (self.lastValidSampleBuffer && !self.stopping && self.videoCallback) {
-                    self.videoCallback(self.lastValidSampleBuffer);
+            CMSampleBufferRef cachedBuffer = NULL;
+            os_unfair_lock_lock(&_captureLock);
+            if (self.lastValidSampleBuffer && !self.stopping) {
+                cachedBuffer = (CMSampleBufferRef)CFRetain(self.lastValidSampleBuffer);
+            }
+            os_unfair_lock_unlock(&_captureLock);
+
+            if (cachedBuffer) {
+                if (self.videoCallback) {
+                    self.videoCallback(cachedBuffer);
                 }
+                CFRelease(cachedBuffer);
             }
             return;
         }
 
         // Cache this valid frame for re-delivery during idle periods
-        @synchronized(self) {
-            if (self.lastValidSampleBuffer) {
-                CFRelease(self.lastValidSampleBuffer);
-            }
-            self.lastValidSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+        os_unfair_lock_lock(&_captureLock);
+        if (self.lastValidSampleBuffer) {
+            CFRelease(self.lastValidSampleBuffer);
         }
+        self.lastValidSampleBuffer = (CMSampleBufferRef)CFRetain(sampleBuffer);
+        os_unfair_lock_unlock(&_captureLock);
 
         if (self.stopping) return;
         if (self.videoCallback) {
