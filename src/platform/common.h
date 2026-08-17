@@ -839,9 +839,10 @@ namespace platf {
    * @param width Display width in pixels.
    * @param height Display height in pixels.
    * @param fps Refresh rate in Hz.
+   * @param retina Retina or HiDPI mode for virtual display.
    * @return The display ID of the created display, or 0 on failure.
    */
-  std::uint32_t virtual_display_create(int width, int height, int fps);
+  std::uint32_t virtual_display_create(int width, int height, int fps, bool retina);
 
   /**
    * @brief Destroy the currently active virtual display.
