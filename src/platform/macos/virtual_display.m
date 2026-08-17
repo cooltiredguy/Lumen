@@ -89,7 +89,7 @@ uint32_t virtual_display_create(int width, int height, int fps, bool retina) {
     widthStr,
     heightStr,
     fpsStr,
-    retinaStr
+    retinaStr,
     NULL
   };
 
