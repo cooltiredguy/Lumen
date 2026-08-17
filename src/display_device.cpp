@@ -777,7 +777,7 @@ namespace display_device {
   void create_virtual_display([[maybe_unused]] const config::video_t &video_config, [[maybe_unused]] const rtsp_stream::launch_session_t &session) {
 #ifdef __APPLE__
     if (video_config.virtual_display == "enabled" && session.width > 0 && session.height > 0 && session.fps > 0) {
-      auto vd_id = platf::virtual_display_create(session.width, session.height, session.fps);
+      auto vd_id = platf::virtual_display_create(session.width, session.height, session.fps, false);
       if (vd_id != 0) {
         BOOST_LOG(info) << "Created virtual display " << vd_id << " (" << session.width << "x" << session.height << "@" << session.fps << "Hz)";
         // Give the window server time to register the display before capture
