@@ -253,8 +253,8 @@ namespace platf {
     virtual_display_destroy();
   }
 
-  std::uint32_t virtual_display_create(int width, int height, int fps) {
-    return ::virtual_display_create(width, height, fps);
+  std::uint32_t virtual_display_create(int width, int height, int fps, bool retina) {
+    return ::virtual_display_create(width, height, fps, retina);
   }
 
   void virtual_display_destroy() {
